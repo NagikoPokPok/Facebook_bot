@@ -2,3 +2,4 @@ requests
 beautifulsoup4
 pynacl
 python-dotenv
+yt-dlp

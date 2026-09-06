@@ -1,146 +1,616 @@
 # deploy.ps1
-# Packages main.py + dependencies and deploys them to AWS Lambda via the AWS CLI.
-# Also wires up a public Function URL, which becomes the Discord Interactions
-# Endpoint URL (replaces the ngrok URL used for local testing).
 #
-# PREREQUISITES (do these once, before running this script):
-#   1. Install AWS CLI v2: https://aws.amazon.com/cli/
-#   2. Run `aws configure` and set your Access Key, Secret Key, and default region.
-#      The IAM user/role you use needs permission to manage Lambda, IAM roles,
-#      and Function URLs (AdministratorAccess is fine for a personal project).
-#   3. Make sure this folder has: main.py, requirements-lambda.txt, and a .env
-#      file containing DISCORD_PUBLIC_KEY, BOT_TOKEN, APPLICATION_ID.
+# Packages main.py + dependencies and deploys them to AWS Lambda via AWS CLI.
 #
-# Run it with:  .\deploy.ps1
+# Also wires up a public Function URL for Discord Interactions.
+#
+# Prerequisites:
+#   1. AWS CLI v2 installed
+#   2. aws configure completed
+#   3. This folder contains:
+#        - main.py
+#        - requirements-lambda.txt
+#        - .env
+#
+# .env must contain:
+#   DISCORD_PUBLIC_KEY=...
+#   BOT_TOKEN=...
+#   APPLICATION_ID=...
+#
+# Run:
+#   .\deploy.ps1
 
 $ErrorActionPreference = "Stop"
 
-# ---- Config: adjust these to your setup ----
+# ============================================================
+# Helpers
+# ============================================================
+
+function Invoke-AwsProbe {
+    param(
+        [Parameter(ValueFromRemainingArguments = $true)]
+        [string[]]$AwsArgs
+    )
+
+    $previousEAP = $ErrorActionPreference
+    $ErrorActionPreference = "SilentlyContinue"
+
+    try {
+        $result = & aws @AwsArgs 2>$null
+        return $result
+    }
+    finally {
+        $ErrorActionPreference = $previousEAP
+    }
+}
+
+function Invoke-AwsStrict {
+    param(
+        [Parameter(ValueFromRemainingArguments = $true)]
+        [string[]]$AwsArgs
+    )
+
+    $previousEAP = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+
+    try {
+        $output = & aws @AwsArgs 2>&1
+        $exitCode = $LASTEXITCODE
+
+        if ($exitCode -ne 0) {
+            $message = ($output | Out-String).Trim()
+
+            if ([string]::IsNullOrWhiteSpace($message)) {
+                $message = "AWS CLI command failed with exit code $exitCode."
+            }
+
+            throw $message
+        }
+
+        return $output
+    }
+    finally {
+        $ErrorActionPreference = $previousEAP
+    }
+}
+
+function Write-Utf8NoBom {
+    param(
+        [string]$Path,
+        [string]$Content
+    )
+
+    $fullPath = Join-Path (Get-Location) $Path
+
+    [System.IO.File]::WriteAllText(
+        $fullPath,
+        $Content,
+        (New-Object System.Text.UTF8Encoding($false))
+    )
+}
+
+function Ensure-LambdaPermission {
+    param(
+        [string]$FunctionName,
+        [string]$StatementId,
+        [string]$Action,
+        [string]$Principal,
+        [string]$Region,
+        [string]$FunctionUrlAuthType = $null,
+        [switch]$InvokedViaFunctionUrl
+    )
+
+    $policyOutput = Invoke-AwsProbe lambda get-policy `
+        --function-name $FunctionName `
+        --region $Region
+
+    if ($policyOutput) {
+        try {
+            # AWS returns:
+            # {
+            #   "Policy": "{\"Version\":\"2012-10-17\",...}"
+            # }
+            $outerPolicy = ($policyOutput -join "`n") | ConvertFrom-Json
+
+            if ($outerPolicy.Policy) {
+                $policy = $outerPolicy.Policy | ConvertFrom-Json
+
+                foreach ($statement in @($policy.Statement)) {
+                    if ($statement.Sid -eq $StatementId) {
+                        Write-Host "Permission '$StatementId' already exists."
+                        return
+                    }
+                }
+            }
+        }
+        catch {
+            Write-Warning "Could not parse existing Lambda policy. AWS will be queried again when adding the permission."
+        }
+    }
+
+    Write-Host "Adding Lambda permission '$StatementId'..."
+
+    $args = @(
+        "lambda",
+        "add-permission",
+        "--function-name", $FunctionName,
+        "--statement-id", $StatementId,
+        "--action", $Action,
+        "--principal", $Principal,
+        "--region", $Region
+    )
+
+    if ($FunctionUrlAuthType) {
+        $args += @(
+            "--function-url-auth-type", $FunctionUrlAuthType
+        )
+    }
+
+    if ($InvokedViaFunctionUrl) {
+        $args += "--invoked-via-function-url"
+    }
+
+    Invoke-AwsStrict @args | Out-Null
+}
+
+# ============================================================
+# Configuration
+# ============================================================
+
 $FunctionName = "fb-embed-bot"
-$Region       = "ap-southeast-1"     # change to your preferred AWS region
+$Region       = "ap-southeast-1"
 $RoleName     = "fb-embed-bot-role"
+
 $Runtime      = "python3.12"
 $Handler      = "main.lambda_handler"
+
 $BuildDir     = "build"
 $ZipFile      = "function.zip"
 
-# ---- Step 1: clean up any previous build ----
-Write-Host "Cleaning previous build..."
-if (Test-Path $BuildDir) { Remove-Item -Recurse -Force $BuildDir }
-if (Test-Path $ZipFile)  { Remove-Item -Force $ZipFile }
-New-Item -ItemType Directory -Path $BuildDir | Out-Null
+# Discord needs a public HTTPS endpoint.
+# Change to AWS_IAM only if you intentionally want a private,
+# IAM-authenticated Function URL.
+$FunctionUrlAuthType = "NONE"
 
-# ---- Step 2: install dependencies targeting Lambda's Linux runtime ----
-# IMPORTANT: PyNaCl ships a compiled C extension. Installing it normally on
-# Windows produces a Windows wheel that will NOT run on Lambda (Amazon Linux).
-# These flags force pip to download manylinux wheels instead, matching Lambda.
-Write-Host "Installing dependencies for Lambda (manylinux)..."
-pip install -r requirements-lambda.txt `
-    --target $BuildDir `
-    --platform manylinux2014_x86_64 `
-    --implementation cp `
-    --python-version 3.12 `
-    --only-binary=:all: `
-    --upgrade
+$EnvConfigFile = "env-config.json"
 
-# ---- Step 3: copy the source code into the build folder ----
-Copy-Item main.py $BuildDir
+# ============================================================
+# Main deployment
+# ============================================================
 
-# ---- Step 4: zip everything up ----
-Write-Host "Zipping package..."
-Compress-Archive -Path "$BuildDir\*" -DestinationPath $ZipFile
-Write-Host "Package ready: $ZipFile"
+try {
 
-# ---- Step 5: create the IAM execution role (only runs once, skips if it exists) ----
-$roleExists = aws iam get-role --role-name $RoleName 2>$null
-if (-not $roleExists) {
-    Write-Host "Creating IAM execution role $RoleName..."
-    $trustPolicy = @'
+    # --------------------------------------------------------
+    # Step 0: Validate required local files
+    # --------------------------------------------------------
+
+    Write-Host "Validating project files..."
+
+    foreach ($requiredFile in @(
+        "main.py",
+        "requirements-lambda.txt",
+        ".env"
+    )) {
+        if (-not (Test-Path $requiredFile)) {
+            throw "Required file not found: $requiredFile"
+        }
+    }
+
+    # --------------------------------------------------------
+    # Step 1: Clean previous build
+    # --------------------------------------------------------
+
+    Write-Host "Cleaning previous build..."
+
+    if (Test-Path $BuildDir) {
+        Remove-Item -Recurse -Force $BuildDir
+    }
+
+    if (Test-Path $ZipFile) {
+        Remove-Item -Force $ZipFile
+    }
+
+    New-Item -ItemType Directory -Path $BuildDir | Out-Null
+
+    # --------------------------------------------------------
+    # Step 2: Install Lambda dependencies
+    # --------------------------------------------------------
+
+    Write-Host "Installing dependencies for Lambda (manylinux)..."
+
+    & pip install `
+        -r requirements-lambda.txt `
+        --target $BuildDir `
+        --platform manylinux2014_x86_64 `
+        --implementation cp `
+        --python-version 3.12 `
+        --only-binary=:all: `
+        --upgrade
+
+    if ($LASTEXITCODE -ne 0) {
+        throw "pip install failed with exit code $LASTEXITCODE."
+    }
+
+    # --------------------------------------------------------
+    # Step 3: Copy source
+    # --------------------------------------------------------
+
+    Write-Host "Copying source code..."
+
+    Copy-Item main.py $BuildDir
+
+    # --------------------------------------------------------
+    # Step 4: Create ZIP
+    # --------------------------------------------------------
+
+    Write-Host "Zipping package..."
+
+    Compress-Archive `
+        -Path "$BuildDir\*" `
+        -DestinationPath $ZipFile
+
+    if (-not (Test-Path $ZipFile)) {
+        throw "Failed to create $ZipFile"
+    }
+
+    Write-Host "Package ready: $ZipFile"
+
+    # --------------------------------------------------------
+    # Step 5: IAM execution role
+    # --------------------------------------------------------
+
+    Write-Host "Checking IAM execution role..."
+
+    $roleExists = Invoke-AwsProbe `
+        iam get-role `
+        --role-name $RoleName `
+        --region $Region
+
+    if (-not $roleExists) {
+
+        Write-Host "Creating IAM execution role $RoleName..."
+
+        $trustPolicy = @'
 {
   "Version": "2012-10-17",
-  "Statement": [{
-    "Effect": "Allow",
-    "Principal": {"Service": "lambda.amazonaws.com"},
-    "Action": "sts:AssumeRole"
-  }]
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": {
+        "Service": "lambda.amazonaws.com"
+      },
+      "Action": "sts:AssumeRole"
+    }
+  ]
 }
 '@
-    $trustPolicy | Out-File -Encoding utf8 trust-policy.json
-    aws iam create-role --role-name $RoleName --assume-role-policy-document file://trust-policy.json | Out-Null
-    aws iam attach-role-policy --role-name $RoleName `
-        --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
-    Remove-Item trust-policy.json
-    Write-Host "Waiting for the role to propagate..."
-    Start-Sleep -Seconds 10
-}
 
-$AccountId = (aws sts get-caller-identity --query Account --output text)
-$RoleArn   = "arn:aws:iam::${AccountId}:role/$RoleName"
+        Write-Utf8NoBom `
+            -Path "trust-policy.json" `
+            -Content $trustPolicy
 
-# ---- Step 6: create the function if it doesn't exist yet, otherwise update its code ----
-$functionExists = aws lambda get-function --function-name $FunctionName --region $Region 2>$null
-if ($functionExists) {
-    Write-Host "Function exists, updating code..."
-    aws lambda update-function-code `
+        try {
+
+            Invoke-AwsStrict `
+                iam create-role `
+                --role-name $RoleName `
+                --assume-role-policy-document file://trust-policy.json |
+                Out-Null
+
+            Invoke-AwsStrict `
+                iam attach-role-policy `
+                --role-name $RoleName `
+                --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole |
+                Out-Null
+
+        }
+        finally {
+
+            if (Test-Path "trust-policy.json") {
+                Remove-Item -Force "trust-policy.json"
+            }
+        }
+
+        Write-Host "Waiting for IAM role propagation..."
+        Start-Sleep -Seconds 10
+    }
+
+    $AccountId = (
+        Invoke-AwsStrict `
+            sts get-caller-identity `
+            --query Account `
+            --output text
+    ).ToString().Trim()
+
+    $RoleArn = "arn:aws:iam::${AccountId}:role/$RoleName"
+
+    # --------------------------------------------------------
+    # Step 6: Create/update Lambda function
+    # --------------------------------------------------------
+
+    Write-Host "Checking Lambda function..."
+
+    $functionExists = Invoke-AwsProbe `
+        lambda get-function `
         --function-name $FunctionName `
-        --zip-file "fileb://$ZipFile" `
-        --region $Region | Out-Null
-} else {
-    Write-Host "Creating new function..."
-    aws lambda create-function `
+        --region $Region
+
+    if ($functionExists) {
+
+        Write-Host "Function exists, waiting until it is ready..."
+
+        Invoke-AwsStrict `
+            lambda wait function-active-v2 `
+            --function-name $FunctionName `
+            --region $Region
+
+        Write-Host "Updating Lambda code..."
+
+        Invoke-AwsStrict `
+            lambda update-function-code `
+            --function-name $FunctionName `
+            --zip-file "fileb://$ZipFile" `
+            --region $Region |
+            Out-Null
+
+        Write-Host "Waiting for code update to complete..."
+
+        Invoke-AwsStrict `
+            lambda wait function-updated-v2 `
+            --function-name $FunctionName `
+            --region $Region
+
+    }
+    else {
+
+        Write-Host "Creating new Lambda function..."
+
+        Invoke-AwsStrict `
+            lambda create-function `
+            --function-name $FunctionName `
+            --runtime $Runtime `
+            --handler $Handler `
+            --role $RoleArn `
+            --zip-file "fileb://$ZipFile" `
+            --timeout 10 `
+            --memory-size 256 `
+            --architectures x86_64 `
+            --region $Region |
+            Out-Null
+
+        Write-Host "Waiting for Lambda to become Active..."
+
+        Invoke-AwsStrict `
+            lambda wait function-active-v2 `
+            --function-name $FunctionName `
+            --region $Region
+    }
+
+    Write-Host "Lambda is ready."
+
+    # --------------------------------------------------------
+    # Step 7: Load .env
+    # --------------------------------------------------------
+
+    Write-Host "Reading environment variables from .env..."
+
+    $envVars = @{}
+
+    Get-Content ".env" | ForEach-Object {
+
+        $line = $_.Trim()
+
+        if (
+            [string]::IsNullOrWhiteSpace($line) -or
+            $line.StartsWith("#")
+        ) {
+            return
+        }
+
+        if ($line -notmatch "=") {
+            return
+        }
+
+        $parts = $line -split "=", 2
+
+        $key = $parts[0].Trim()
+        $value = $parts[1].Trim()
+
+        # Remove optional surrounding quotes
+        if (
+            $value.Length -ge 2 -and
+            (
+                ($value.StartsWith('"') -and $value.EndsWith('"')) -or
+                ($value.StartsWith("'") -and $value.EndsWith("'"))
+            )
+        ) {
+            $value = $value.Substring(1, $value.Length - 2)
+        }
+
+        $envVars[$key] = $value
+    }
+
+    # Validate required variables
+    foreach ($requiredVariable in @(
+        "DISCORD_PUBLIC_KEY",
+        "BOT_TOKEN",
+        "APPLICATION_ID"
+    )) {
+        if (
+            -not $envVars.ContainsKey($requiredVariable) -or
+            [string]::IsNullOrWhiteSpace($envVars[$requiredVariable])
+        ) {
+            throw "Missing required .env variable: $requiredVariable"
+        }
+    }
+
+    # --------------------------------------------------------
+    # Step 8: Update Lambda environment
+    # --------------------------------------------------------
+
+    Write-Host "Setting environment variables..."
+
+    $envJson = @{
+        Variables = $envVars
+    } | ConvertTo-Json -Depth 3
+
+    Write-Utf8NoBom `
+        -Path $EnvConfigFile `
+        -Content $envJson
+
+    Invoke-AwsStrict `
+        lambda update-function-configuration `
         --function-name $FunctionName `
-        --runtime $Runtime `
-        --handler $Handler `
-        --role $RoleArn `
-        --zip-file "fileb://$ZipFile" `
-        --timeout 10 `
-        --memory-size 256 `
-        --region $Region | Out-Null
-}
+        --environment "file://$EnvConfigFile" `
+        --region $Region |
+        Out-Null
 
-# ---- Step 7: push secrets from .env into Lambda's environment variables ----
-# Uses a JSON file (not an inline string) so values with special characters
-# don't get mangled by shell quoting.
-Write-Host "Setting environment variables from .env..."
-$envVars = @{}
-Get-Content .env | Where-Object { $_ -match "=" -and $_ -notmatch "^\s*#" } | ForEach-Object {
-    $parts = $_ -split "=", 2
-    $envVars[$parts[0].Trim()] = $parts[1].Trim()
-}
-@{ Variables = $envVars } | ConvertTo-Json -Depth 3 | Out-File -Encoding utf8 env-config.json
+    Remove-Item -Force $EnvConfigFile
 
-aws lambda update-function-configuration `
-    --function-name $FunctionName `
-    --environment file://env-config.json `
-    --region $Region | Out-Null
+    Write-Host "Waiting for environment update to complete..."
 
-Remove-Item env-config.json
-
-# Lambda needs a moment to finish applying the update before the next call
-Start-Sleep -Seconds 5
-
-# ---- Step 8: expose a public Function URL (this is what Discord will call) ----
-$urlConfigExists = aws lambda get-function-url-config --function-name $FunctionName --region $Region 2>$null
-if (-not $urlConfigExists) {
-    Write-Host "Creating public Function URL..."
-    aws lambda create-function-url-config `
+    Invoke-AwsStrict `
+        lambda wait function-updated-v2 `
         --function-name $FunctionName `
-        --auth-type NONE `
-        --region $Region | Out-Null
+        --region $Region
 
-    aws lambda add-permission `
+    # --------------------------------------------------------
+    # Step 9: Create/update Function URL
+    # --------------------------------------------------------
+
+    Write-Host "Checking Function URL..."
+
+    $urlConfig = Invoke-AwsProbe `
+        lambda get-function-url-config `
         --function-name $FunctionName `
-        --statement-id FunctionURLAllowPublicAccess `
-        --action lambda:InvokeFunctionUrl `
-        --principal "*" `
-        --function-url-auth-type NONE `
-        --region $Region | Out-Null
+        --region $Region
+
+    if (-not $urlConfig) {
+
+        Write-Host "Creating Function URL with AuthType=$FunctionUrlAuthType..."
+
+        Invoke-AwsStrict `
+            lambda create-function-url-config `
+            --function-name $FunctionName `
+            --auth-type $FunctionUrlAuthType `
+            --region $Region |
+            Out-Null
+
+    }
+    else {
+
+        $urlConfigObject = ($urlConfig -join "`n") | ConvertFrom-Json
+
+        if ($urlConfigObject.AuthType -ne $FunctionUrlAuthType) {
+
+            Write-Host "Updating Function URL AuthType: $($urlConfigObject.AuthType) -> $FunctionUrlAuthType"
+
+            Invoke-AwsStrict `
+                lambda update-function-url-config `
+                --function-name $FunctionName `
+                --auth-type $FunctionUrlAuthType `
+                --region $Region |
+                Out-Null
+        }
+        else {
+            Write-Host "Function URL already uses AuthType=$FunctionUrlAuthType"
+        }
+    }
+
+    # --------------------------------------------------------
+    # Step 10: Function URL permissions
+    # --------------------------------------------------------
+
+    if ($FunctionUrlAuthType -eq "NONE") {
+
+        Write-Host "Ensuring public Function URL permissions..."
+
+        # Required since October 2025:
+        # 1. lambda:InvokeFunctionUrl
+        # 2. lambda:InvokeFunction
+        #
+        # Both are required for public Function URLs.
+
+        Ensure-LambdaPermission `
+            -FunctionName $FunctionName `
+            -StatementId "FunctionURLAllowPublicAccess" `
+            -Action "lambda:InvokeFunctionUrl" `
+            -Principal "*" `
+            -FunctionUrlAuthType "NONE" `
+            -Region $Region
+
+        Ensure-LambdaPermission `
+            -FunctionName $FunctionName `
+            -StatementId "FunctionURLInvokeAllowPublicAccess" `
+            -Action "lambda:InvokeFunction" `
+            -Principal "*" `
+            -InvokedViaFunctionUrl `
+            -Region $Region
+    }
+
+    # --------------------------------------------------------
+    # Step 11: Get final Function URL
+    # --------------------------------------------------------
+
+    $FunctionUrl = (
+        Invoke-AwsStrict `
+            lambda get-function-url-config `
+            --function-name $FunctionName `
+            --region $Region `
+            --query FunctionUrl `
+            --output text
+    ).ToString().Trim()
+
+    # --------------------------------------------------------
+    # Step 12: Final verification
+    # --------------------------------------------------------
+
+    Write-Host ""
+    Write-Host "Verifying Lambda state..."
+
+    $finalState = (
+        Invoke-AwsStrict `
+            lambda get-function-configuration `
+            --function-name $FunctionName `
+            --region $Region `
+            --query "{State:State,LastUpdateStatus:LastUpdateStatus}" `
+            --output json
+    ) -join "`n"
+
+    Write-Host $finalState
+
+    Write-Host ""
+    Write-Host "============================================"
+    Write-Host "Deployment successful."
+    Write-Host "Function: $FunctionName"
+    Write-Host "Region:   $Region"
+    Write-Host "URL:      $FunctionUrl"
+    Write-Host "Auth:     $FunctionUrlAuthType"
+    Write-Host "============================================"
+    Write-Host ""
+    Write-Host "Set this as your Discord Interactions Endpoint URL:"
+    Write-Host $FunctionUrl
+
 }
+catch {
 
-$FunctionUrl = aws lambda get-function-url-config `
-    --function-name $FunctionName --region $Region --query FunctionUrl --output text
+    Write-Host ""
+    Write-Host "============================================" -ForegroundColor Red
+    Write-Host "DEPLOYMENT FAILED" -ForegroundColor Red
+    Write-Host "============================================" -ForegroundColor Red
+    Write-Host $_.Exception.Message -ForegroundColor Red
+    Write-Host ""
 
-Write-Host ""
-Write-Host "Deploy done."
-Write-Host "Set this as your Discord Interactions Endpoint URL (paste exactly, no trailing changes):"
-Write-Host $FunctionUrl
+    exit 1
+}
+finally {
+
+    # Always remove generated temporary files
+    if (Test-Path $EnvConfigFile) {
+        Remove-Item -Force $EnvConfigFile
+    }
+
+    if (Test-Path "trust-policy.json") {
+        Remove-Item -Force "trust-policy.json"
+    }
+}

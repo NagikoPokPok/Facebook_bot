@@ -1,0 +1,107 @@
+[
+  {
+    "id": "case_1_text_only",
+    "title": "Chỉ có nội dung văn bản (Text-only)",
+    "description": "Caption dài hơn 4 dòng, có ký tự xuống dòng gốc, hashtags, nút Xem thêm/Thu gọn.",
+    "props": {
+      "pageName": "Trang Công Nghệ & Khởi Nghiệp",
+      "avatarUrl": "https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=100&h=100&fit=crop&crop=faces",
+      "isVerified": true,
+      "timestamp": "2 giờ trước",
+      "caption": "🚀 Đột phá mới trong tối ưu hóa Web & Server-side Proxy năm 2026!\n\nNhiều nhà phát triển thường gặp vấn đề khi nhúng nội dung Facebook: CDN đổi token chữ ký sau vài giờ dẫn tới lỗi 403 Forbidden, hoặc trình duyệt bị chặn hotlink do thiếu header Referer hợp lệ.\n\nBằng cách triển khai lớp Proxy Layer thông minh kết hợp với bộ đệm (In-memory/Disk Cache) và Fallback UI chuẩn, tốc độ tải trang đã cải thiện 70% và triệt tiêu 100% tình trạng icon ảnh bị vỡ.\n\n💡 Hãy tham khảo kiến trúc chi tiết bên dưới nhé!\n#FacebookEmbed #WebDev #Performance #Optimization",
+      "mediaType": "none",
+      "mediaUrls": [],
+      "likeCount": "14.2K",
+      "commentCount": "1.8K",
+      "shareCount": "942",
+      "postUrl": "https://www.facebook.com"
+    }
+  },
+  {
+    "id": "case_2_single_image",
+    "title": "Một ảnh Full-width",
+    "description": "Ảnh tỷ lệ chuẩn 16:9 / 4:3, bo góc, căn giữa, hover zoom nhẹ.",
+    "props": {
+      "pageName": "Vườn Quốc Gia Việt Nam",
+      "avatarUrl": "https://images.unsplash.com/photo-1570295999919-56ceb5ecca61?w=100&h=100&fit=crop&crop=faces",
+      "isVerified": true,
+      "timestamp": "4 giờ trước",
+      "caption": "Bình minh tuyệt đẹp trên đỉnh Tà Xùa sáng nay. Một biển mây bồng bềnh trải dài ngút ngàn tầm mắt trong không khí se lạnh đầu thu. 🌄☁️\n\nBạn đã từng đặt chân tới chốn thần tiên này chưa?",
+      "mediaType": "image",
+      "mediaUrls": [
+        "https://images.unsplash.com/photo-1506744038136-46273834b3fb?w=1000&auto=format&fit=crop&q=80"
+      ],
+      "likeCount": "38.6K",
+      "commentCount": "2.4K",
+      "shareCount": "5.1K",
+      "postUrl": "https://www.facebook.com"
+    }
+  },
+  {
+    "id": "case_3_multi_images",
+    "title": "Album nhiều ảnh (Grid Facebook +N)",
+    "description": "Gồm 6 ảnh, hiển thị lưới 2 cột, ảnh thứ 4 phủ mờ đen với số lượng còn lại (+3).",
+    "props": {
+      "pageName": "Ẩm Thực & Du Lịch 360",
+      "avatarUrl": "https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=100&h=100&fit=crop&crop=faces",
+      "isVerified": false,
+      "timestamp": "Hôm qua lúc 19:30",
+      "caption": "Chùm ảnh dạo quanh phố cổ Hội An về đêm rực rỡ sắc màu lồng đèn. Đừng quên thử ngay bánh mì Phượng và chè bắp nổi tiếng nhé cả nhà! 🏮🍜✨\n(Tổng hợp 6 góc check-in đỉnh nhất)",
+      "mediaType": "carousel",
+      "mediaUrls": [
+        "https://images.unsplash.com/photo-1552465011-b4e21bf6e79a?w=700&auto=format&fit=crop&q=80",
+        "https://images.unsplash.com/photo-1528127269322-539801943592?w=700&auto=format&fit=crop&q=80",
+        "https://images.unsplash.com/photo-1565299624946-b28f40a0ae38?w=700&auto=format&fit=crop&q=80",
+        "https://images.unsplash.com/photo-1507525428034-b723cf961d3e?w=700&auto=format&fit=crop&q=80",
+        "https://images.unsplash.com/photo-1506744038136-46273834b3fb?w=700&auto=format&fit=crop&q=80",
+        "https://images.unsplash.com/photo-1518684079-3c830dcef090?w=700&auto=format&fit=crop&q=80"
+      ],
+      "likeCount": "19.5K",
+      "commentCount": "876",
+      "shareCount": "1.2K",
+      "postUrl": "https://www.facebook.com"
+    }
+  },
+  {
+    "id": "case_4_video",
+    "title": "Video Reel / Watch",
+    "description": "Thumbnail video chất lượng cao kèm nút play tròn kính mờ ở giữa và nhãn thời lượng góc dưới.",
+    "props": {
+      "pageName": "Công Nghệ Không Giới Hạn",
+      "avatarUrl": "https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=100&h=100&fit=crop&crop=faces",
+      "isVerified": true,
+      "timestamp": "3 ngày trước",
+      "caption": "🔥 Trải nghiệm thực tế robot hình người thế hệ mới hỗ trợ pha chế cà phê và nấu ăn gia đình. Cùng xem độ mượt mà của các khớp chuyển động cơ học nhé!",
+      "mediaType": "video",
+      "duration": "04:18",
+      "mediaUrls": [
+        "https://images.unsplash.com/photo-1485827404703-89b55fcc595e?w=1000&auto=format&fit=crop&q=80"
+      ],
+      "videoStreamUrl": "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4",
+      "likeCount": "52.3K",
+      "commentCount": "4.7K",
+      "shareCount": "18.2K",
+      "postUrl": "https://www.facebook.com"
+    }
+  },
+  {
+    "id": "case_5_image_error_fallback",
+    "title": "Trường hợp ảnh lỗi hoàn toàn (Fallback & Retry)",
+    "description": "URL ảnh bị lỗi 403/hết hạn. Client retry 1 lần sau đó hiển thị fallback card gradient Facebook mờ.",
+    "props": {
+      "pageName": "Nhóm Phát Triển Phần Mềm",
+      "avatarUrl": "https://images.unsplash.com/photo-1494790108377-be9c29b29330?w=100&h=100&fit=crop&crop=faces",
+      "isVerified": false,
+      "timestamp": "6 giờ trước",
+      "caption": "⚠️ Kiểm tra trạng thái lỗi: URL ảnh này bị lỗi hoặc link Facebook CDN hết hạn. Không xuất hiện icon ảnh vỡ mặc định mà kích hoạt cơ chế retry 1 lần và fallback gradient!",
+      "mediaType": "image",
+      "mediaUrls": [
+        "https://scontent.xx.fbcdn.net/v/t39.30808-6/invalid_expired_token_mock_test.jpg"
+      ],
+      "likeCount": "820",
+      "commentCount": "94",
+      "shareCount": "15",
+      "postUrl": "https://www.facebook.com"
+    }
+  }
+]

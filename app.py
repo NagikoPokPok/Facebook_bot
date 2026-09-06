@@ -2,16 +2,13 @@ import os
 from dotenv import load_dotenv
 from flask import Flask, request, Response
 from main import lambda_handler
-
-# ==============================================================================
-# BƯỚC 1: KHỞI TẠO BIẾN MÔI TRƯỜNG VÀ FLASK SERVER
-# - Nạp file .env để lấy các giá trị cấu hình cần thiết.
-# - Khởi tạo ứng dụng Flask để làm cầu nối nhận webhook HTTP từ Discord khi test local.
-# ==============================================================================
+from embed_card.media_proxy import media_proxy_bp
 
 load_dotenv()
 
 app = Flask(__name__)
+app.register_blueprint(media_proxy_bp)
+
 
 
 # ==============================================================================
@@ -21,6 +18,7 @@ app = Flask(__name__)
 # - Trả kết quả về cho Discord với đúng HTTP status code và headers.
 # ==============================================================================
 
+@app.route("/", methods=["POST"])
 @app.route("/interactions", methods=["POST"])
 def interactions():
     # Chuyển đổi request của Flask thành định dạng event mà Lambda handler yêu cầu

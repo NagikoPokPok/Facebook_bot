@@ -324,6 +324,34 @@ try {
 
     $RoleArn = "arn:aws:iam::${AccountId}:role/$RoleName"
 
+    # ponytail: Đảm bảo IAM Role có quyền tự gọi chính nó (Self-Invoke Async) để xử lý tác vụ ngầm miễn phí 0đ
+    Write-Host "Ensuring self-invoke policy on IAM role..."
+    $selfInvokePolicy = @'
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": "lambda:InvokeFunction",
+      "Resource": "*"
+    }
+  ]
+}
+'@
+    Write-Utf8NoBom -Path "self-invoke-policy.json" -Content $selfInvokePolicy
+    try {
+        Invoke-AwsStrict iam put-role-policy `
+            --role-name $RoleName `
+            --policy-name "LambdaSelfInvokePolicy" `
+            --policy-document file://self-invoke-policy.json | Out-Null
+    }
+    finally {
+        if (Test-Path "self-invoke-policy.json") {
+            Remove-Item -Force "self-invoke-policy.json"
+        }
+    }
+
+
     # --------------------------------------------------------
     # Step 6: Create/update Lambda function
     # --------------------------------------------------------
@@ -462,6 +490,8 @@ try {
         lambda update-function-configuration `
         --function-name $FunctionName `
         --environment "file://$EnvConfigFile" `
+        --timeout 10 `
+        --memory-size 256 `
         --region $Region |
         Out-Null
 
@@ -579,17 +609,71 @@ try {
 
     Write-Host $finalState
 
+    # Đặt CloudWatch Log Retention = 7 ngày để log không tích tụ quá 5GB Free Tier
+    Write-Host "Configuring CloudWatch log retention (7 days - 100% Free Tier protection)..."
+    Invoke-AwsProbe logs put-retention-policy `
+        --log-group-name "/aws/lambda/$FunctionName" `
+        --retention-in-days 7 `
+        --region $Region | Out-Null
+
+
+    # --------------------------------------------------------
+    # Step 13: HTTP API Gateway (v2) for Discord (100% Free Tier)
+    # Discord's infrastructure reliably connects to standard *.amazonaws.com domains,
+    # avoiding DNS/routing incompatibilities with *.on.aws Function URLs.
+    # --------------------------------------------------------
+    Write-Host "Configuring HTTP API Gateway for Discord (100% Free Tier)..."
+    $ApiName = "fb-embed-bot-api"
+    $apiId = $null
+    $apiEndpoint = $null
+
+    $existingApis = Invoke-AwsProbe apigatewayv2 get-apis --region $Region
+    if ($existingApis) {
+        $apiObj = ($existingApis -join "`n") | ConvertFrom-Json
+        foreach ($a in @($apiObj.Items)) {
+            if ($a.Name -eq $ApiName) {
+                $apiId = $a.ApiId
+                $apiEndpoint = $a.ApiEndpoint
+                break
+            }
+        }
+    }
+
+    if (-not $apiId) {
+        Write-Host "Creating HTTP API Gateway $ApiName..."
+        $lambdaArn = (Invoke-AwsStrict lambda get-function-configuration --function-name $FunctionName --region $Region --query FunctionArn --output text).Trim()
+        $newApi = Invoke-AwsStrict apigatewayv2 create-api `
+            --name $ApiName `
+            --protocol-type HTTP `
+            --target $lambdaArn `
+            --region $Region | ConvertFrom-Json
+
+        $apiId = $newApi.ApiId
+        $apiEndpoint = $newApi.ApiEndpoint
+
+        Ensure-LambdaPermission `
+            -FunctionName $FunctionName `
+            -StatementId "ApiGatewayInvokePermission" `
+            -Action "lambda:InvokeFunction" `
+            -Principal "apigateway.amazonaws.com" `
+            -Region $Region
+    }
+    else {
+        Write-Host "HTTP API Gateway already exists: $apiId ($apiEndpoint)"
+    }
+
+    $DiscordEndpointUrl = "$apiEndpoint/"
+
     Write-Host ""
     Write-Host "============================================"
     Write-Host "Deployment successful."
-    Write-Host "Function: $FunctionName"
-    Write-Host "Region:   $Region"
-    Write-Host "URL:      $FunctionUrl"
-    Write-Host "Auth:     $FunctionUrlAuthType"
+    Write-Host "Function:    $FunctionName"
+    Write-Host "Region:      $Region"
+    Write-Host "Discord URL: $DiscordEndpointUrl"
     Write-Host "============================================"
     Write-Host ""
-    Write-Host "Set this as your Discord Interactions Endpoint URL:"
-    Write-Host $FunctionUrl
+    Write-Host "Verified Discord Interactions Endpoint URL:"
+    Write-Host $DiscordEndpointUrl
 
 }
 catch {

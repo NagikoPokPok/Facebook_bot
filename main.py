@@ -92,24 +92,38 @@ def _verify(event: dict):
     timestamp = headers.get("x-signature-timestamp")
     body = _raw_body(event)
 
-    if not verify_key or not signature or not timestamp:
+    if not verify_key:
+        logger.error("verify_key chua duoc khoi tao! Kiem tra bien moi truong DISCORD_PUBLIC_KEY.")
         return False, body
+
+    if not signature or not timestamp:
+        logger.warning(f"Thieu header chu ky. Co cac headers: {list(headers.keys())}")
+        return False, body
+
     try:
         verify_key.verify(f"{timestamp}{body}".encode(), bytes.fromhex(signature))
+        logger.info("Xac thuc chu ky Ed25519 thanh cong!")
         return True, body
-    except (BadSignatureError, ValueError):
+    except (BadSignatureError, ValueError) as err:
+        logger.warning(f"Xac thuc chu ky that bai: {err}")
         return False, body
 
 
 def _json_response(payload: dict) -> dict:
     """
-    Đóng gói payload thành response HTTP 200 JSON chuẩn cho API Gateway / Flask.
+    Đóng gói payload thành response HTTP 200 JSON chuẩn kèm CORS headers.
     """
     return {
         "statusCode": 200,
-        "headers": {"Content-Type": "application/json"},
+        "headers": {
+            "Content-Type": "application/json",
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
+            "Access-Control-Allow-Headers": "Content-Type, X-Signature-Ed25519, X-Signature-Timestamp",
+        },
         "body": json.dumps(payload, ensure_ascii=False),
     }
+
 
 
 def _format_count(count_value) -> str:
@@ -602,39 +616,91 @@ def lambda_handler(event, context):
     """
     Handler chính xử lý toàn bộ request từ Discord tương tác với Lambda / Webhook.
     """
-    logger.info("=== INCOMING EVENT ===")
+    # ponytail: Bắt tác vụ tự gọi ngầm (Async Lambda Invoke) để không bị Lambda đóng băng CPU
+    if isinstance(event, dict) and event.get("async_task") == "process_slash_command":
+        logger.info("=== RUNNING ASYNC BACKGROUND TASK ===")
+        _process_slash_command(event.get("interaction", {}))
+        return {"statusCode": 200, "body": "done"}
 
-    # 1. Xác thực chữ ký số request
+    method = (
+        event.get("requestContext", {}).get("http", {}).get("method")
+        or event.get("httpMethod")
+        or ""
+    ).upper()
+
+    # ponytail: Xử lý CORS Preflight (OPTIONS) từ trình duyệt
+    if method == "OPTIONS":
+        logger.info("=== HANDLING CORS OPTIONS PREFLIGHT ===")
+        return {
+            "statusCode": 200,
+            "headers": {
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
+                "Access-Control-Allow-Headers": "Content-Type, X-Signature-Ed25519, X-Signature-Timestamp",
+            },
+            "body": "",
+        }
+
+    logger.info(f"=== INCOMING EVENT === Method: {method}")
+
+    cors_headers = {
+        "Content-Type": "text/plain",
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type, X-Signature-Ed25519, X-Signature-Timestamp",
+    }
+
+    # 1. BẮT BUỘC: Xác thực chữ ký số Ed25519 TRƯỚC TIÊN cho mọi request (kể cả PING)
+    # Discord gửi cả request hợp lệ lẫn chữ ký giả mạo để kiểm tra bảo mật của endpoint.
+    # Nếu chữ ký không khớp, bắt buộc phải trả về 401 Unauthorized.
     try:
-        ok, body = _verify(event)
+        ok, verified_body = _verify(event)
         if not ok:
             return {
                 "statusCode": 401,
-                "headers": {"Content-Type": "text/plain"},
+                "headers": cors_headers,
                 "body": "Invalid request signature",
             }
+        body = verified_body
     except Exception as error:
         logger.error(f"Loi xac thuc chu ky: {str(error)}")
         logger.error(traceback.format_exc())
         return {
             "statusCode": 401,
-            "headers": {"Content-Type": "text/plain"},
+            "headers": cors_headers,
             "body": "Invalid request signature",
         }
 
-    # 2. Phân tích nội dung JSON của interaction
-    interaction = json.loads(body)
+    # 2. Sau khi xác thực chữ ký số thành công, phân tích JSON payload
+    try:
+        interaction = json.loads(body)
+    except Exception:
+        interaction = {}
 
-    # 3. Phản hồi yêu cầu Ping từ Discord (Type 1)
+    # 3. Phản hồi yêu cầu PING handshake (Type 1) từ Discord Developer Portal
     if interaction.get("type") == 1:
+        logger.info("=== DISCORD PING HANDSHAKE (TYPE 1) VERIFIED -> RETURNING PONG ===")
         return _json_response({"type": 1})
 
-    # 4. Xử lý Application Command / Slash Command (Type 2)
+    # 2. Xử lý Application Command / Slash Command (Type 2)
     if interaction.get("type") == 2:
-        # Chạy tác vụ cào dữ liệu trên luồng nền (Background Thread)
-        bg_thread = threading.Thread(target=_process_slash_command, args=(interaction,))
-        bg_thread.daemon = True
-        bg_thread.start()
+
+        # ponytail: Nếu chạy trên AWS Lambda, kích hoạt Async Invoke chính nó bằng boto3 (có sẵn trong runtime, 0đ)
+        # để trả về Type 5 < 50ms cho Discord mà tiến trình cào dữ liệu không bị đóng băng (freezing).
+        if context and hasattr(context, "function_name"):
+            try:
+                import boto3
+                boto3.client("lambda").invoke(
+                    FunctionName=context.function_name,
+                    InvocationType="Event",
+                    Payload=json.dumps({"async_task": "process_slash_command", "interaction": interaction}),
+                )
+            except Exception as err:
+                logger.error(f"Lỗi gọi Async Lambda invoke: {err}, chuyển sang dùng thread dự phòng")
+                threading.Thread(target=_process_slash_command, args=(interaction,), daemon=True).start()
+        else:
+            # Chạy thread bình thường khi test local với Flask app.py
+            threading.Thread(target=_process_slash_command, args=(interaction,), daemon=True).start()
 
         # Trả về ngay Type 5 (DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE) trong < 50ms để tránh timeout 3 giây của Discord
         return _json_response({"type": 5})

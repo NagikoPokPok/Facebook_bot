@@ -245,9 +245,9 @@ try {
 
     Write-Host "Zipping package..."
 
-    Compress-Archive `
-        -Path "$BuildDir\*" `
-        -DestinationPath $ZipFile
+    # ponytail: Dùng Python zipfile chuẩn thay vì Compress-Archive của Windows để tránh lỗi InvalidZipFileException trên Linux Lambda
+    $pythonCmd = if (Test-Path ".\.venv\Scripts\python.exe") { ".\.venv\Scripts\python.exe" } else { "python" }
+    & $pythonCmd -c "import zipfile, os; z = zipfile.ZipFile('$ZipFile', 'w', zipfile.ZIP_DEFLATED); [z.write(os.path.join(root, file), os.path.relpath(os.path.join(root, file), '$BuildDir')) for root, dirs, files in os.walk('$BuildDir') for file in files]; z.close()"
 
     if (-not (Test-Path $ZipFile)) {
         throw "Failed to create $ZipFile"
@@ -400,8 +400,8 @@ try {
             --handler $Handler `
             --role $RoleArn `
             --zip-file "fileb://$ZipFile" `
-            --timeout 10 `
-            --memory-size 256 `
+            --timeout 60 `
+            --memory-size 512 `
             --architectures x86_64 `
             --region $Region |
             Out-Null
@@ -490,8 +490,8 @@ try {
         lambda update-function-configuration `
         --function-name $FunctionName `
         --environment "file://$EnvConfigFile" `
-        --timeout 10 `
-        --memory-size 256 `
+        --timeout 60 `
+        --memory-size 512 `
         --region $Region |
         Out-Null
 
@@ -503,6 +503,15 @@ try {
         lambda wait function-updated-v2 `
         --function-name $FunctionName `
         --region $Region
+
+    # ponytail: Tắt retry tự động khi chạy async để không bị kẹt hàng đợi (0 retries)
+    Write-Host "Setting async maximum retry attempts to 0..."
+    Invoke-AwsStrict `
+        lambda put-function-event-invoke-config `
+        --function-name $FunctionName `
+        --maximum-retry-attempts 0 `
+        --region $Region |
+        Out-Null
 
     # --------------------------------------------------------
     # Step 9: Create/update Function URL

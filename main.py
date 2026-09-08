@@ -13,7 +13,7 @@ from dotenv import load_dotenv
 from nacl.exceptions import BadSignatureError
 from nacl.signing import VerifyKey
 import requests
-import yt_dlp
+# ponytail: Không import yt_dlp ở top-level (tốn 4.2s nạp module gây cold start timeout 3s của Discord). Lazy load khi cần.
 
 # ==============================================================================
 # BƯỚC 1: KHỞI TẠO CẤU HÌNH VÀ BIẾN MÔI TRƯỜNG
@@ -57,6 +57,16 @@ if DISCORD_PUBLIC_KEY:
         verify_key = VerifyKey(bytes.fromhex(DISCORD_PUBLIC_KEY))
     except Exception as error:
         logger.error(f"Khong the khoi tao DISCORD_PUBLIC_KEY: {error}")
+
+# ponytail: Lazy singleton boto3 lambda client có sẵn region để tái sử dụng connection pool
+_lambda_client = None
+
+def _get_lambda_client():
+    global _lambda_client
+    if _lambda_client is None:
+        import boto3
+        _lambda_client = boto3.client("lambda", region_name=os.environ.get("AWS_REGION", "ap-southeast-1"))
+    return _lambda_client
 
 
 # ==============================================================================
@@ -219,7 +229,7 @@ def _chunk_text(text: str, max_chunk_size: int = 3800) -> list:
 
 def _fetch_fb_data(url: str) -> dict:
     """
-    Thu thập toàn bộ dữ liệu Facebook và thống kê tương tác với thời gian phản hồi siêu tốc (< 2-3s).
+    Thu thập toàn bộ dữ liệu Facebook và thống kê tương tác với thời gian phản hồi siêu tốc (< 1.5-2s).
     """
     data = {
         "title": None,
@@ -235,124 +245,130 @@ def _fetch_fb_data(url: str) -> dict:
         "timestamp": None,
     }
 
-    # Phân loại link: Chỉ gọi yt-dlp nếu URL thực sự là Video/Reel
+    # Phân loại link: Xác định URL có phải là Video/Reel/Watch hay không
     is_video_link = bool(re.search(r"/(?:reel|watch|videos|share/v|r)/", url, re.IGNORECASE))
 
-    # 1. Xử lý đường dẫn Video / Reel bằng yt-dlp với timeout chặt chẽ
-    if is_video_link:
+    # ponytail: BƯỚC 1: FAST-PATH (1 request HTTP duy nhất ~1s) cào cả OpenGraph, Full-text, Stats & Direct Video MP4
+    try:
+        clean_url = re.sub(r"[?&](?:rdid|share_url|__cft__|__tn__)=[^&]*", "", data["url"] or url)
+        resp = http_session.get(clean_url, headers=HEADERS, allow_redirects=True, timeout=5)
+        html = resp.text
+        soup = BeautifulSoup(html, "html.parser")
+
+        def og(property_name: str) -> str:
+            tag = soup.find("meta", property=property_name)
+            return tag["content"].strip() if tag and tag.get("content") else None
+
+        og_title = og("og:title")
+        og_desc = og("og:description")
+        og_image = og("og:image")
+        og_video = og("og:video") or og("og:video:secure_url") or og("og:video:url")
+
+        invalid_titles = ["error", "error facebook", "facebook", "đăng nhập hoặc đăng ký để xem"]
+        if og_title and og_title.lower() not in invalid_titles:
+            data["title"] = data["title"] or og_title
+            data["author"] = data["author"] or og_title
+
+        data["image"] = data["image"] or og_image
+        data["url"] = str(resp.url)
+
+        # ponytail: Trích xuất trực tiếp CDN link MP4 từ JSON nhúng trong HTML của Facebook (không cần yt-dlp)
+        video_matches = re.findall(
+            r'"(?:playable_url|playable_url_quality_hd|browser_native_hd_url|browser_native_sd_url)"\s*:\s*"(https?[^"]+)"',
+            html,
+        )
+        for v_match in video_matches:
+            try:
+                decoded_v = json.loads(f'"{v_match}"')
+                if decoded_v.startswith("http"):
+                    data["video_url"] = decoded_v
+                    break
+            except Exception:
+                clean_v = v_match.replace(r"\/", "/")
+                if clean_v.startswith("http"):
+                    data["video_url"] = clean_v
+                    break
+
+        if not data["video_url"] and og_video:
+            data["video_url"] = og_video
+
+        # Trích xuất toàn bộ bài viết không bị cắt ngắn từ Relay/GraphQL JSON
+        matches = re.findall(r'"(?:message|body|text)":\{"text":"(.*?)"\}', html)
+        longest_text = ""
+        for match in matches:
+            try:
+                decoded = json.loads(f'"{match}"')
+                if len(decoded) > len(longest_text):
+                    longest_text = decoded
+            except Exception:
+                pass
+
+        if longest_text:
+            data["description"] = longest_text
+        elif og_desc and "xem bài viết, ảnh và nội dung khác" not in og_desc.lower():
+            data["description"] = og_desc
+
+        # Trích xuất số liệu likes/comments/shares và creation_time từ HTML JSON
+        if not data["likes"]:
+            rx_reactions = re.findall(r'"reaction_count"\s*:\s*\{\s*"count"\s*:\s*(\d+)\}', html)
+            if rx_reactions:
+                data["likes"] = rx_reactions[0]
+
+        if not data["comments"]:
+            rx_comments = re.findall(r'"(?:total_comment_count|total_count)"\s*:\s*(\d+)', html)
+            if rx_comments:
+                data["comments"] = rx_comments[0]
+
+        if not data["shares"]:
+            rx_shares = re.findall(r'"share_count"\s*:\s*\{\s*"count"\s*:\s*(\d+)\}', html)
+            if rx_shares:
+                data["shares"] = rx_shares[0]
+
+        if not data["timestamp"]:
+            rx_time = re.findall(r'"(?:creation_time|publish_time)"\s*:\s*(\d{10})', html)
+            if rx_time:
+                data["timestamp"] = rx_time[0]
+
+    except Exception as error:
+        logger.warning(f"Fast-path fetch error: {error}")
+
+    # ponytail: BƯỚC 2: CHỈ FALLBACK SANG yt-dlp KHI LÀ VIDEO MÀ FAST-PATH CHƯA BÓC ĐƯỢC LINK STREAM
+    if is_video_link and not data.get("video_url"):
         try:
+            import yt_dlp
             ydl_opts = {
                 "quiet": True,
                 "no_warnings": True,
+                "skip_download": True,
                 "extract_flat": False,
                 "noplaylist": True,
-                "socket_timeout": 4,
+                "socket_timeout": 6,
                 "cachedir": False,
+                "check_formats": False,  # ponytail: Không probe từng format stream giúp tiết kiệm 2-3s
             }
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
                 if info:
                     raw_title = info.get("title") or ""
-                    data["author"] = info.get("uploader") or info.get("channel")
-                    data["description"] = info.get("description")
-                    data["image"] = info.get("thumbnail")
-                    data["video_url"] = info.get("url")
+                    data["author"] = data["author"] or info.get("uploader") or info.get("channel")
+                    data["description"] = data["description"] or info.get("description")
+                    data["image"] = data["image"] or info.get("thumbnail")
+                    data["video_url"] = data["video_url"] or info.get("url")
                     if info.get("webpage_url"):
                         data["url"] = info.get("webpage_url")
 
-                    # Lấy chỉ số thống kê từ yt-dlp
-                    data["likes"] = info.get("like_count")
-                    data["comments"] = info.get("comment_count")
-                    data["shares"] = info.get("repost_count") or info.get("share_count")
-                    data["timestamp"] = info.get("timestamp") or info.get("upload_date")
+                    data["likes"] = data["likes"] or info.get("like_count")
+                    data["comments"] = data["comments"] or info.get("comment_count")
+                    data["shares"] = data["shares"] or info.get("repost_count") or info.get("share_count")
+                    data["timestamp"] = data["timestamp"] or info.get("timestamp") or info.get("upload_date")
 
-                    # Phân tích chỉ số reactions/views nếu có sẵn trong tiêu đề Facebook
-                    reactions_match = re.search(r"([\d\.,]+[KMB]?)\s*reactions?", raw_title, re.I)
-                    if reactions_match and not data["likes"]:
-                        data["likes"] = reactions_match.group(1)
-
-                    comments_match = re.search(r"([\d\.,]+[KMB]?)\s*(?:comments?|bình luận)", raw_title, re.I)
-                    if comments_match and not data["comments"]:
-                        data["comments"] = comments_match.group(1)
-
-                    shares_match = re.search(r"([\d\.,]+[KMB]?)\s*(?:shares?|chia sẻ)", raw_title, re.I)
-                    if shares_match and not data["shares"]:
-                        data["shares"] = shares_match.group(1)
-
-                    # Làm sạch tiêu đề (loại bỏ phần thống kê 186K views · 2.6K reactions)
                     if " | " in raw_title:
                         parts = raw_title.split(" | ")
-                        data["title"] = parts[1] if len(parts) > 1 else parts[0]
-                    else:
+                        data["title"] = data["title"] or (parts[1] if len(parts) > 1 else parts[0])
+                    elif not data["title"]:
                         data["title"] = raw_title
         except Exception as error:
-            logger.warning(f"yt-dlp extract failed: {error}")
-
-    # 2. Xử lý bài viết văn bản / ảnh bằng 1 Request duy nhất (lấy cả OpenGraph + Full Text JSON + Stats)
-    if not data["video_url"] or not data["description"]:
-        try:
-            clean_url = re.sub(r"[?&](?:rdid|share_url|__cft__|__tn__)=[^&]*", "", data["url"] or url)
-            resp = http_session.get(clean_url, headers=HEADERS, allow_redirects=True, timeout=4)
-            html = resp.text
-            soup = BeautifulSoup(html, "html.parser")
-
-            def og(property_name: str) -> str:
-                tag = soup.find("meta", property=property_name)
-                return tag["content"].strip() if tag and tag.get("content") else None
-
-            og_title = og("og:title")
-            og_desc = og("og:description")
-            og_image = og("og:image")
-            og_video = og("og:video") or og("og:video:secure_url") or og("og:video:url")
-
-            invalid_titles = ["error", "error facebook", "facebook", "đăng nhập hoặc đăng ký để xem"]
-            if og_title and og_title.lower() not in invalid_titles:
-                data["title"] = data["title"] or og_title
-                data["author"] = data["author"] or og_title
-
-            data["image"] = data["image"] or og_image
-            data["video_url"] = data["video_url"] or og_video
-            data["url"] = str(resp.url)
-
-            # Trích xuất toàn bộ bài viết không bị cắt ngắn từ cấu trúc Relay/GraphQL JSON trong HTML
-            matches = re.findall(r'"(?:message|body|text)":\{"text":"(.*?)"\}', html)
-            longest_text = ""
-            for match in matches:
-                try:
-                    decoded = json.loads(f'"{match}"')
-                    if len(decoded) > len(longest_text):
-                        longest_text = decoded
-                except Exception:
-                    pass
-
-            if longest_text:
-                data["description"] = longest_text
-            elif og_desc and "xem bài viết, ảnh và nội dung khác" not in og_desc.lower():
-                data["description"] = og_desc
-
-            # Trích xuất số liệu likes/comments/shares và creation_time từ HTML JSON
-            if not data["likes"]:
-                rx_reactions = re.findall(r'"reaction_count":\{"count":(\d+)\}', html)
-                if rx_reactions:
-                    data["likes"] = rx_reactions[0]
-
-            if not data["comments"]:
-                rx_comments = re.findall(r'"(?:total_comment_count|total_count)":(\d+)', html)
-                if rx_comments:
-                    data["comments"] = rx_comments[0]
-
-            if not data["shares"]:
-                rx_shares = re.findall(r'"share_count":\{"count":(\d+)\}', html)
-                if rx_shares:
-                    data["shares"] = rx_shares[0]
-
-            if not data["timestamp"]:
-                rx_time = re.findall(r'"(?:creation_time|publish_time)":(\d{10})', html)
-                if rx_time:
-                    data["timestamp"] = rx_time[0]
-
-        except Exception as error:
-            logger.warning(f"Fast-path fetch error: {error}")
+            logger.warning(f"yt-dlp fallback failed: {error}")
 
     return data
 
@@ -689,8 +705,7 @@ def lambda_handler(event, context):
         # để trả về Type 5 < 50ms cho Discord mà tiến trình cào dữ liệu không bị đóng băng (freezing).
         if context and hasattr(context, "function_name"):
             try:
-                import boto3
-                boto3.client("lambda").invoke(
+                _get_lambda_client().invoke(
                     FunctionName=context.function_name,
                     InvocationType="Event",
                     Payload=json.dumps({"async_task": "process_slash_command", "interaction": interaction}),

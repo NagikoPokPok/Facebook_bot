@@ -1,10 +1,26 @@
+# Environment and Secrets
 .env
-.venv
-*.zip
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Temporary deployment files
+env-config.json
+trust-policy.json
+self-invoke-policy.json
+
+# Virtual environments and dependencies
+.venv/
+venv/
+ENV/
 build/
 dist/
 *.egg-info/
+
+# Packages and caches
+*.zip
 __pycache__/
 *.pyc
-.vscode/
 .pytest_cache/
+.vscode/

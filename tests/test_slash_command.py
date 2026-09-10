@@ -200,3 +200,97 @@ class TestSlashCommandHandling:
             called_json = mock_patch.call_args[1]["json"]
             assert len(called_json["content"]) <= 2000
             assert called_json["content"].endswith("...")
+
+    def test_process_slash_command_threads_routing(self):
+        interaction = {
+            "token": "test_threads_token",
+            "data": {
+                "name": "threads",
+                "options": [
+                    {"name": "url", "value": "https://www.threads.net/@zuck/post/CuZsgfWLyiI"}
+                ],
+            },
+        }
+
+        with patch("main._process_threads_command") as mock_threads_cmd:
+            _process_slash_command(interaction)
+            mock_threads_cmd.assert_called_once_with(interaction)
+
+    def test_process_threads_command_invalid_url(self):
+        interaction = {
+            "token": "test_threads_token",
+            "data": {
+                "name": "threads",
+                "options": [
+                    {"name": "url", "value": "https://invalid-domain.com/post/123"}
+                ],
+            },
+        }
+
+        with patch("main._send_followup") as mock_followup:
+            main._process_threads_command(interaction)
+            mock_followup.assert_called_once()
+            args = mock_followup.call_args[0]
+            assert args[0] == "test_threads_token"
+            assert "Tên miền không được hỗ trợ" in args[1]["content"]
+
+    def test_process_threads_command_success(self):
+        interaction = {
+            "token": "test_threads_token",
+            "data": {
+                "name": "threads",
+                "options": [
+                    {"name": "url", "value": "https://www.threads.net/@zuck/post/CuZsgfWLyiI"}
+                ],
+            },
+        }
+
+        from threads_fetcher import ThreadsPost
+        dummy_post = ThreadsPost(
+            author_name="Mark Zuckerberg",
+            author_handle="zuck",
+            author_avatar_url="https://example.com/avatar.jpg",
+            text="Hello Threads!",
+            post_url="https://www.threads.net/@zuck/post/CuZsgfWLyiI",
+        )
+
+        with patch("threads_fetcher.ThreadsFetcher.fetch_post", return_value=dummy_post), \
+             patch("main._send_followup") as mock_followup:
+            main._process_threads_command(interaction)
+            mock_followup.assert_called_once()
+            args = mock_followup.call_args[0]
+            assert args[0] == "test_threads_token"
+            assert "embeds" in args[1]
+            assert args[1]["embeds"][0]["author"]["name"] == "Mark Zuckerberg (@zuck)"
+
+    def test_process_threads_command_share_url_success(self):
+        interaction = {
+            "token": "test_share_token",
+            "data": {
+                "name": "th",
+                "options": [
+                    {"name": "url", "value": "https://www.threads.com/share/IqfJJdeHW/"}
+                ],
+            },
+        }
+
+        from threads_fetcher import ThreadsPost
+        dummy_post = ThreadsPost(
+            author_name="Dây Chun",
+            author_handle="daychun5",
+            author_avatar_url=None,
+            text="Bài viết từ link share!",
+            post_url="https://www.threads.net/@daychun5/post/DdErKg5D6uB",
+        )
+
+        with patch("threads_fetcher.ThreadsFetcher.fetch_post", return_value=dummy_post), \
+             patch("main._send_followup") as mock_followup:
+            main._process_threads_command(interaction)
+            mock_followup.assert_called_once()
+            args = mock_followup.call_args[0]
+            assert args[0] == "test_share_token"
+            assert "embeds" in args[1]
+            assert args[1]["embeds"][0]["author"]["name"] == "Dây Chun (@daychun5)"
+            assert args[1]["embeds"][0]["url"] == "https://www.threads.net/@daychun5/post/DdErKg5D6uB"
+
+

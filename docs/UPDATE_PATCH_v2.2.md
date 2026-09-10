@@ -74,6 +74,38 @@ flowchart TD
 1. **`threads_fetcher.py`**: Module bóc tách dữ liệu bất đồng bộ, quản lý `aiohttp.ClientSession`, cache TTL và xử lý layered fallback.
 2. **`threads_embed_builder.py`**: Module chuyên trách tạo `discord.Embed` và `discord.ui.View` cùng hàm xuất raw API dict cho serverless.
 3. **`cogs/threads_embed.py`**: Cog `discord.py` cung cấp slash command `/threads` và `/th`, cooldown 5 giây chống spam và deferral chống timeout.
-4. **`tests/test_threads.py`**: Bộ kiểm thử tự động gồm 16 test cases bao quát mọi kịch bản dữ liệu.
+4. **`tests/test_threads.py`**: Bộ kiểm thử tự động gồm 19 test cases bao quát mọi kịch bản dữ liệu.
 5. **`bot.py` & `main.py`**: Cập nhật đăng ký bulk commands và handler ngầm cho serverless bot.
 6. **`requirements.txt`**: Bổ sung `aiohttp>=3.9.0`, `cachetools>=5.3.0`, `discord.py>=2.3.0`.
+
+---
+
+## 4. BẢN HOTFIX v2.2.1: HỖ TRỢ URL CHIA SẺ DI ĐỘNG (`/share/XXXX`)
+
+### 4.1. Vấn đề phát hiện (Problem Statement)
+Khi người dùng chia sẻ bài viết từ ứng dụng di động Threads qua chức năng "Sao chép liên kết" (Copy Link), Threads sinh ra đường link chia sẻ dạng rút gọn:
+- `https://www.threads.com/share/IqfJJdeHW/`
+- `https://www.threads.com/share/QOVP7ZtYH/`
+- Các biến thể kèm tham số tracking `?xmt=AQG...` hoặc không có dấu gạch chéo cuối.
+
+Ở phiên bản v2.2.0, biểu thức chính quy kiểm tra định dạng cứng nhắc yêu cầu `@user/post/xxxx` hoặc `/t/xxxx`, dẫn đến việc bot từ chối ngay lập tức với lỗi:
+`⚠️ Đường dẫn không đúng định dạng bài viết Threads (ví dụ: https://www.threads.net/@user/post/xxxx).`
+
+### 4.2. Giải pháp kỹ thuật (Engineering Solution)
+Áp dụng triết lý tối giản **Ponytail**:
+1. **Mở rộng Regex Pattern (`THREADS_POST_REGEX`):**
+   - Hỗ trợ thêm 2 nhóm định dạng: `post/(?P<pid>[a-zA-Z0-9_-]+)` và `share/(?P<share_id>[a-zA-Z0-9_-]+)`.
+   - Tự động chuẩn hóa domain `threads.com` và `threads.net`.
+2. **Cơ chế HTTP 302 Pre-Resolution (`_resolve_share_url`):**
+   - Trước khi cào nội dung, nếu URL thuộc dạng `/share/`, bot gửi một lightweight request `allow_redirects=False` để đọc trực tiếp header `Location` của Threads trong ~50ms.
+   - Trích xuất canonical URL thực tế (`https://www.threads.net/@user/post/xxxx`) kèm author handle ngay lập tức.
+   - Xử lý bài viết đã xóa/riêng tư: Nếu `Location` chuyển hướng đến `?error=invalid_post`, lập tức kích hoạt ngoại lệ chuẩn `ThreadsPostNotFound` thay vì lỗi định dạng URL.
+3. **Đa khóa bộ nhớ đệm (Multi-Key Caching):**
+   - Kết quả trích xuất được lưu đồng thời dưới key URL ban đầu người dùng nhập (share link), key canonical link chuẩn hóa và key post URL trực tiếp.
+4. **Hỗ trợ đa ngôn ngữ OpenGraph Title:**
+   - Cập nhật `TITLE_AUTHOR_REGEX` nhận diện thêm từ khóa tiếng Việt `trên` (ví dụ: `Tên Tác Giả (@handle) trên Threads`).
+5. **Video Stream Meta Tags:**
+   - Bổ sung trích xuất `og:video:secure_url` và `twitter:player:stream`.
+6. **Bộ kiểm thử tự động:**
+   - Nâng cấp tổng số test cases lên **69** (bao gồm kiểm thử link share, pre-resolution 302, bài viết xóa/riêng tư, tiêu đề tiếng Việt và slash command).
+

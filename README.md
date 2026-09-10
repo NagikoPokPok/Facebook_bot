@@ -1,7 +1,7 @@
 # FACEBOOK & THREADS EMBED DISCORD BOT (HYBRID ARCHITECTURE)
 > Bot Discord tự động nhúng và trích xuất nội dung bài viết, video từ **Facebook** và **Threads (Meta)** dưới dạng Rich Embeds chuẩn nhận diện thương hiệu, hỗ trợ cả kiến trúc Serverless trên AWS Lambda và Discord.py Cog.
 
-**Phiên bản:** 2.2.0  
+**Phiên bản:** 2.2.1 (Hotfix Mobile Share Links)  
 **Ngày cập nhật cuối (Last Updated):** 2026-09-10  
 **Runtime:** Python 3.12+ (AWS Lambda x86_64 / Local Gateway)
 
@@ -14,6 +14,7 @@
    - Tự động fallback sang `yt-dlp` cho các video phức tạp.
    - Hiển thị thống kê tương tác (Likes, Comments, Shares) và giao diện Embed khung xanh Facebook (`0x1877F2`).
 2. **Nhúng bài viết Threads (`/threads [url]` hoặc alias `/th [url]`):**
+   - **Hỗ trợ mọi định dạng URL:** Chuẩn hóa toàn bộ URL bài viết (`@user/post/xxxx`), liên kết rút gọn (`/t/xxxx`, `/post/xxxx`) và **liên kết chia sẻ từ ứng dụng di động** (`/share/xxxx` với HTTP 302 Pre-Resolution).
    - **Layered Fallback 3 tầng:** Fast-Path Meta Scraper (`facebookexternalhit/1.1`) -> Tokenless Official oEmbed (`graph.threads.net/oembed`) -> Graceful Minimal Fallback.
    - **SSRF Protection:** Whitelist nghiêm ngặt tên miền (`threads.net`, `threads.com`).
    - **In-Memory TTL Caching:** Lưu bộ nhớ đệm kép (10 phút cho Post, 1 giờ cho Avatar tác giả) chống rate-limit.
@@ -127,7 +128,7 @@ Sau khi hoàn tất, script sẽ in ra URL công khai. Cung cấp URL này vào 
 
 ## 4. HƯỚNG DẪN KIỂM THỬ (TESTING GUIDE)
 
-Hệ thống sử dụng `pytest` với 44 test cases tự động, không phụ thuộc vào kết nối mạng ngoài hay dữ liệu tĩnh:
+Hệ thống sử dụng `pytest` với 69 test cases tự động, không phụ thuộc vào kết nối mạng ngoài hay dữ liệu tĩnh:
 
 ```powershell
 # Kích hoạt môi trường ảo và chạy toàn bộ kiểm thử

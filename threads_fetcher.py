@@ -4,7 +4,7 @@ import datetime
 import logging
 import re
 from typing import Optional
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urljoin
 
 import aiohttp
 from bs4 import BeautifulSoup
@@ -54,9 +54,10 @@ class ThreadsPost:
 ALLOWED_DOMAINS = {"threads.net", "www.threads.net", "threads.com", "www.threads.com"}
 
 # Regex matching Threads post URLs:
-# e.g.: https://www.threads.net/@zuck/post/CuZsgfWLyiI or https://www.threads.com/t/CuZsgfWLyiI
+# e.g.: https://www.threads.net/@zuck/post/CuZsgfWLyiI, https://www.threads.com/t/CuZsgfWLyiI,
+# https://www.threads.com/post/CuZsgfWLyiI, or https://www.threads.com/share/IqfJJdeHW/
 THREADS_POST_REGEX = re.compile(
-    r"^https?://(?:www\.)?threads\.(?:net|com)/(?:@(?P<handle>[a-zA-Z0-9._]+)/post/(?P<post_id>[a-zA-Z0-9_-]+)|t/(?P<tid>[a-zA-Z0-9_-]+))",
+    r"^https?://(?:www\.)?threads\.(?:net|com)/(?:@(?P<handle>[a-zA-Z0-9._]+)/post/(?P<post_id>[a-zA-Z0-9_-]+)|t/(?P<tid>[a-zA-Z0-9_-]+)|post/(?P<pid>[a-zA-Z0-9_-]+)|share/(?P<share_id>[a-zA-Z0-9_-]+))",
     re.IGNORECASE,
 )
 
@@ -68,9 +69,9 @@ SCRAPER_HEADERS = {
 }
 
 # Regex to parse author name & handle from og:title:
-# e.g.: "Mark Zuckerberg (@zuck) on Threads" or "Mark Zuckerberg (@zuck) · Threads"
+# e.g.: "Mark Zuckerberg (@zuck) on Threads", "Mark Zuckerberg (@zuck) trên Threads"
 TITLE_AUTHOR_REGEX = re.compile(
-    r"^(?P<name>.+?)\s*\(@(?P<handle>[a-zA-Z0-9._]+)\)\s*(?:on|•|·|\-)\s*Threads",
+    r"^(?P<name>.+?)\s*\(@(?P<handle>[a-zA-Z0-9._]+)\)\s*(?:on|trên|•|·|\-)\s*Threads",
     re.IGNORECASE,
 )
 
@@ -125,7 +126,7 @@ class ThreadsFetcher:
         if parsed.scheme not in ("http", "https"):
             raise ThreadsInvalidURLError("Giao thức URL không hợp lệ (yêu cầu http hoặc https).")
 
-        domain = (parsed.netloc or "").lower()
+        domain = (parsed.netloc or "").lower().split(":")[0]
         # Enforce whitelist against SSRF attacks
         if domain not in ALLOWED_DOMAINS:
             raise ThreadsInvalidURLError(
@@ -135,19 +136,50 @@ class ThreadsFetcher:
         match = THREADS_POST_REGEX.match(url)
         if not match:
             raise ThreadsInvalidURLError(
-                "Đường dẫn không đúng định dạng bài viết Threads (ví dụ: https://www.threads.net/@user/post/xxxx)."
+                "Đường dẫn không đúng định dạng bài viết Threads (ví dụ: https://www.threads.net/@user/post/xxxx hoặc https://www.threads.com/share/xxxx)."
             )
 
         handle = match.group("handle")
-        post_id = match.group("post_id") or match.group("tid")
-        
-        # Standardize canonical URL form
-        if handle:
-            canonical_url = f"https://www.threads.net/@{handle}/post/{post_id}"
-        else:
-            canonical_url = f"https://www.threads.net/t/{post_id}"
+        post_id = match.group("post_id") or match.group("tid") or match.group("pid")
+        share_id = match.group("share_id")
 
-        return canonical_url, handle, post_id
+        # Standardize canonical URL form
+        # ponytail: Chuẩn hóa canonical URL theo dạng chuẩn threads.net, giữ nguyên share_id nếu là link share
+        if handle and post_id:
+            canonical_url = f"https://www.threads.net/@{handle}/post/{post_id}"
+            ident = post_id
+        elif post_id:
+            canonical_url = f"https://www.threads.net/t/{post_id}"
+            ident = post_id
+        elif share_id:
+            canonical_url = f"https://www.threads.net/share/{share_id}"
+            ident = share_id
+        else:
+            canonical_url = url
+            ident = ""
+
+        return canonical_url, handle, ident
+
+    async def _resolve_share_url(self, share_url: str) -> tuple[str, Optional[str], str]:
+        """
+        ponytail: Resolve Threads /share/ shortlink to canonical post URL via HTTP 302 Location header.
+        """
+        session = await self.get_session()
+        try:
+            async with session.get(share_url, allow_redirects=False) as resp:
+                loc = resp.headers.get("Location")
+                if loc:
+                    if "error=invalid_post" in loc:
+                        raise ThreadsPostNotFound("Bài viết này không tồn tại, đã bị xóa hoặc đang ở chế độ riêng tư.")
+                    parsed_loc = urlparse(loc)
+                    if not parsed_loc.netloc:
+                        loc = urljoin(share_url, loc)
+                    return self.validate_and_normalize_url(loc)
+        except ThreadsPostNotFound:
+            raise
+        except Exception as err:
+            logger.debug(f"Could not pre-resolve share URL {share_url}: {err}")
+        return share_url, None, ""
 
     async def fetch_post(self, url: str) -> ThreadsPost:
         """
@@ -155,10 +187,29 @@ class ThreadsFetcher:
         """
         canonical_url, extracted_handle, post_id = self.validate_and_normalize_url(url)
 
-        # Layer 0: Check in-memory TTL Cache
+        # Layer 0: Check in-memory TTL Cache (check both original input and canonical)
+        if url in self.post_cache:
+            logger.info(f"Threads Cache HIT for input URL: {url}")
+            return self.post_cache[url]
         if canonical_url in self.post_cache:
             logger.info(f"Threads Cache HIT for URL: {canonical_url}")
             return self.post_cache[canonical_url]
+
+        # ponytail: Nếu là link chia sẻ /share/, resolve HTTP redirect để lấy canonical post URL và handle
+        if "/share/" in canonical_url:
+            resolved_url, resolved_handle, resolved_id = await self._resolve_share_url(canonical_url)
+            if resolved_url != canonical_url:
+                if resolved_url in self.post_cache:
+                    logger.info(f"Threads Cache HIT for resolved URL: {resolved_url}")
+                    cached_post = self.post_cache[resolved_url]
+                    self.post_cache[canonical_url] = cached_post
+                    self.post_cache[url] = cached_post
+                    return cached_post
+                canonical_url = resolved_url
+                if resolved_handle:
+                    extracted_handle = resolved_handle
+                if resolved_id:
+                    post_id = resolved_id
 
         logger.info(f"Threads Cache MISS for URL: {canonical_url} - Fetching from network")
 
@@ -166,7 +217,10 @@ class ThreadsFetcher:
         try:
             post = await self._fetch_og_scrape(canonical_url, extracted_handle, post_id)
             if post:
+                self.post_cache[url] = post
                 self.post_cache[canonical_url] = post
+                if post.post_url and post.post_url not in self.post_cache:
+                    self.post_cache[post.post_url] = post
                 return post
         except ThreadsPostNotFound:
             # Propagate 404 / private post immediately, do not fallback
@@ -178,8 +232,13 @@ class ThreadsFetcher:
         try:
             post = await self._fetch_oembed(canonical_url, extracted_handle, post_id)
             if post:
+                self.post_cache[url] = post
                 self.post_cache[canonical_url] = post
+                if post.post_url and post.post_url not in self.post_cache:
+                    self.post_cache[post.post_url] = post
                 return post
+        except ThreadsPostNotFound:
+            raise
         except Exception as err:
             logger.warning(f"Layer 2 (oEmbed) failed for {canonical_url}: {err}. Falling back to Layer 3...")
 
@@ -196,6 +255,8 @@ class ThreadsFetcher:
             post_url=canonical_url,
             is_fallback=True,
         )
+        self.post_cache[url] = fallback_post
+        self.post_cache[canonical_url] = fallback_post
         return fallback_post
 
     async def _fetch_og_scrape(
@@ -219,7 +280,12 @@ class ThreadsFetcher:
             og_title = self._get_meta(soup, "og:title") or ""
             og_desc = self._get_meta(soup, "og:description") or self._get_meta(soup, "description") or ""
             og_image = self._get_meta(soup, "og:image") or self._get_meta(soup, "twitter:image")
-            og_video = self._get_meta(soup, "og:video") or self._get_meta(soup, "og:video:url")
+            og_video = (
+                self._get_meta(soup, "og:video")
+                or self._get_meta(soup, "og:video:url")
+                or self._get_meta(soup, "og:video:secure_url")
+                or self._get_meta(soup, "twitter:player:stream")
+            )
             og_url = self._get_meta(soup, "og:url") or canonical_url
 
             # If title indicates Login page or empty content, it is deleted or private
@@ -262,6 +328,9 @@ class ThreadsFetcher:
 
             video_thumbnail = og_image if og_video else None
 
+            # ponytail: Ưu tiên link post trực tiếp từ og:url nếu có thay vì link /share/ hoặc /t/
+            final_post_url = og_url if (og_url and "threads." in og_url and "/post/" in og_url) else canonical_url
+
             return ThreadsPost(
                 author_name=author_name,
                 author_handle=author_handle or "threads",
@@ -271,7 +340,7 @@ class ThreadsFetcher:
                 video_url=og_video,
                 video_thumbnail_url=video_thumbnail,
                 profile_url=profile_url,
-                post_url=canonical_url,
+                post_url=final_post_url,
                 is_fallback=False,
             )
 

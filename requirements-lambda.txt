@@ -3,3 +3,5 @@ beautifulsoup4
 pynacl
 python-dotenv
 yt-dlp
+aiohttp>=3.9.0
+cachetools>=5.3.0

@@ -188,6 +188,8 @@ try {
 
     foreach ($requiredFile in @(
         "main.py",
+        "threads_fetcher.py",
+        "threads_embed_builder.py",
         "requirements-lambda.txt",
         ".env"
     )) {
@@ -237,7 +239,10 @@ try {
 
     Write-Host "Copying source code..."
 
+    # ponytail: Sao chép cả module trích xuất Threads và Facebook vào gói Lambda
     Copy-Item main.py $BuildDir
+    Copy-Item threads_fetcher.py $BuildDir
+    Copy-Item threads_embed_builder.py $BuildDir
 
     # --------------------------------------------------------
     # Step 4: Create ZIP

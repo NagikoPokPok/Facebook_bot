@@ -36,6 +36,11 @@ class TestThreadsURLValidation:
             ("https://www.threads.com/@someone/post/abc_XYZ-1", "@someone", "abc_XYZ-1"),
             ("https://threads.net/t/CuZsgfWLyiI", None, "CuZsgfWLyiI"),
             ("http://threads.com/t/ABC123", None, "ABC123"),
+            ("https://www.threads.net/post/CuZsgfWLyiI", None, "CuZsgfWLyiI"),
+            ("https://www.threads.com/share/IqfJJdeHW/", None, "IqfJJdeHW"),
+            ("https://www.threads.com/share/QOVP7ZtYH/", None, "QOVP7ZtYH"),
+            ("https://threads.net/share/IqfJJdeHW", None, "IqfJJdeHW"),
+            ("https://www.threads.com/share/IqfJJdeHW/?xmt=AQG0rhQBG", None, "IqfJJdeHW"),
         ]
         for url, expected_handle, expected_id in valid_urls:
             canonical, handle, post_id = ThreadsFetcher.validate_and_normalize_url(url)
@@ -145,6 +150,54 @@ class TestThreadsFetcher:
             assert "Không thể tải nội dung" in result.text
 
         await fetcher.close()
+
+    async def test_resolve_share_url_success(self):
+        fetcher = ThreadsFetcher()
+        share_url = "https://www.threads.com/share/IqfJJdeHW/"
+        resolved_post_url = "https://www.threads.com/@daychun5/post/DdErKg5D6uB?xmt=AQG"
+
+        mock_resp = MagicMock()
+        mock_resp.status = 302
+        mock_resp.headers = {"Location": resolved_post_url}
+
+        mock_session = MagicMock()
+        mock_session.get.return_value.__aenter__.return_value = mock_resp
+        mock_session.closed = False
+        mock_session.close = AsyncMock()
+        fetcher._session = mock_session
+
+        canonical, handle, post_id = await fetcher._resolve_share_url(share_url)
+        assert canonical == "https://www.threads.net/@daychun5/post/DdErKg5D6uB"
+        assert handle == "daychun5"
+        assert post_id == "DdErKg5D6uB"
+        await fetcher.close()
+
+    async def test_resolve_share_url_deleted_raises(self):
+        fetcher = ThreadsFetcher()
+        share_url = "https://www.threads.com/share/QOVP7ZtYH/"
+        invalid_redirect = "https://www.threads.com/?error=invalid_post"
+
+        mock_resp = MagicMock()
+        mock_resp.status = 302
+        mock_resp.headers = {"Location": invalid_redirect}
+
+        mock_session = MagicMock()
+        mock_session.get.return_value.__aenter__.return_value = mock_resp
+        mock_session.closed = False
+        mock_session.close = AsyncMock()
+        fetcher._session = mock_session
+
+        with pytest.raises(ThreadsPostNotFound):
+            await fetcher._resolve_share_url(share_url)
+        await fetcher.close()
+
+    async def test_vietnamese_tren_title_parsing(self):
+        from threads_fetcher import TITLE_AUTHOR_REGEX
+        title = "Dây Chun (@daychun5) trên Threads"
+        m = TITLE_AUTHOR_REGEX.match(title)
+        assert m is not None
+        assert m.group("name") == "Dây Chun"
+        assert m.group("handle") == "daychun5"
 
 
 # ==============================================================================

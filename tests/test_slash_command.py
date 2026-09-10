@@ -142,3 +142,61 @@ class TestSlashCommandHandling:
             res = lambda_handler(event, None)
             mock_proc.assert_called_once_with({"token": "async_token"})
             assert res["statusCode"] == 200
+
+    def test_video_long_caption_splits_into_followups(self):
+        interaction = {
+            "token": "token_long_video",
+            "data": {
+                "options": [
+                    {"name": "url", "value": "https://www.facebook.com/reel/123456"}
+                ]
+            },
+        }
+
+        # Caption dài 3000 ký tự
+        long_caption = "Đoạn văn miêu tả video dài rất hay và chi tiết. " * 60
+        mock_data = {
+            "title": "Video Dài",
+            "description": long_caption,
+            "image": "https://fbcdn.net/thumb.jpg",
+            "video_url": "https://fbcdn.net/video.mp4",
+            "author": "Fanpage Dai",
+            "site_name": "Facebook",
+            "url": "https://www.facebook.com/reel/123456",
+            "likes": 100,
+            "comments": 5,
+            "shares": 1,
+            "timestamp": time.time(),
+        }
+
+        with patch("main._fetch_fb_data", return_value=mock_data), \
+             patch("main._send_followup") as mock_followup, \
+             patch("main._send_new_followup") as mock_new_followup:
+            _process_slash_command(interaction)
+            mock_followup.assert_called_once()
+            call_args = mock_followup.call_args[0]
+            token, payload = call_args[0], call_args[1]
+            assert token == "token_long_video"
+            assert len(payload["content"]) <= 2000
+            assert "[▶️ Video](https://fbcdn.net/video.mp4)" in payload["content"]
+            # Phải có ít nhất 1 followup bổ sung do caption dài
+            assert mock_new_followup.call_count >= 1
+            for call in mock_new_followup.call_args_list:
+                new_payload = call[0][1]
+                assert len(new_payload["content"]) <= 2000
+
+    def test_send_followup_content_length_safety(self, monkeypatch):
+        monkeypatch.setattr(main, "APPLICATION_ID", "dummy_app_id")
+        overlength_content = "A" * 2500
+
+        with patch("requests.patch") as mock_patch:
+            mock_resp = MagicMock()
+            mock_resp.status_code = 200
+            mock_patch.return_value = mock_resp
+
+            main._send_followup("dummy_token", {"content": overlength_content})
+
+            mock_patch.assert_called_once()
+            called_json = mock_patch.call_args[1]["json"]
+            assert len(called_json["content"]) <= 2000
+            assert called_json["content"].endswith("...")

@@ -16,35 +16,63 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN")
 url = f"https://discord.com/api/v10/applications/{APPLICATION_ID}/commands"
 
 # ==============================================================================
-# BƯỚC 2: KHỞI TẠO CẤU TRÚC SLASH COMMAND /fbembbed
-# - name: Tên lệnh khi gõ trên Discord (/fbembbed).
-# - description: Mô tả ngắn của lệnh hiển thị cho người dùng.
-# - options: Danh sách tham số đầu vào (bắt buộc nhập URL bài viết Facebook).
+# BƯỚC 2: KHỞI TẠO CẤU TRÚC SLASH COMMANDS (/fbembbed, /threads, /th)
 # ==============================================================================
 
-commands = {
-    "name": "fbembbed",
-    "description": "Embed a Facebook post in Discord",
-    "options": [
-        {
-            "name": "url",
-            "description": "The URL of the Facebook post to embed",
-            "type": 3,  # 3 đại diện cho String type trong Discord API
-            "required": True
-        }
-    ]
-}
+commands = [
+    {
+        "name": "fbembbed",
+        "description": "Embed a Facebook post or video in Discord",
+        "options": [
+            {
+                "name": "url",
+                "description": "The URL of the Facebook post to embed",
+                "type": 3,  # String
+                "required": True
+            }
+        ]
+    },
+    {
+        "name": "threads",
+        "description": "Fetch & hiển thị bài viết từ Threads dưới dạng rich embed đẹp",
+        "options": [
+            {
+                "name": "url",
+                "description": "The URL of the Threads post (threads.net or threads.com)",
+                "type": 3,  # String
+                "required": True
+            }
+        ]
+    },
+    {
+        "name": "th",
+        "description": "Alias rút gọn cho lệnh /threads",
+        "options": [
+            {
+                "name": "url",
+                "description": "The URL of the Threads post (threads.net or threads.com)",
+                "type": 3,  # String
+                "required": True
+            }
+        ]
+    }
+]
 
 # ==============================================================================
-# BƯỚC 3: GỬI REQUEST ĐĂNG KÝ COMMAND LÊN DISCORD API
-# - Dùng method POST kèm Bot Token trong header Authorization.
-# - Discord sẽ trả về mã 200/201 nếu đăng ký thành công.
+# BƯỚC 3: GỬI REQUEST ĐĂNG KÝ COMMANDS LÊN DISCORD REST API v10
+# - Dùng method PUT để bulk overwrite toàn bộ Global Application Commands.
 # ==============================================================================
 
-response = requests.post(
-    url,
-    json=commands,
-    headers={"Authorization": f"Bot {BOT_TOKEN}"}
-)
-
-print(response.status_code, response.json())
+if APPLICATION_ID and BOT_TOKEN:
+    response = requests.put(
+        url,
+        json=commands,
+        headers={"Authorization": f"Bot {BOT_TOKEN}"}
+    )
+    print(f"Status: {response.status_code}")
+    try:
+        print(response.json())
+    except Exception:
+        print(response.text)
+else:
+    print("Thiếu APPLICATION_ID hoặc BOT_TOKEN trong môi trường (.env).")

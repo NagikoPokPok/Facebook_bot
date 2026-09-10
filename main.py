@@ -390,6 +390,12 @@ def _send_followup(token: str, payload: dict):
     if not APPLICATION_ID or not token:
         logger.error("Thieu APPLICATION_ID hoac token de gui followup")
         return
+
+    # Bảo vệ: Discord giới hạn message content tối đa 2000 ký tự
+    if "content" in payload and payload["content"] and len(payload["content"]) > 2000:
+        logger.warning(f"Followup content quá dài ({len(payload['content'])} ký tự), tự động cắt ngắn về 2000.")
+        payload["content"] = payload["content"][:1996] + "..."
+
     url = f"https://discord.com/api/v10/webhooks/{APPLICATION_ID}/{token}/messages/@original"
     try:
         resp = requests.patch(
@@ -400,6 +406,16 @@ def _send_followup(token: str, payload: dict):
         )
         if resp.status_code not in (200, 204):
             logger.error(f"Followup that bai (code {resp.status_code}): {resp.text}")
+            # Fallback nếu payload bị từ chối: gửi tin nhắn đơn giản để giải phóng trạng thái 'đang suy nghĩ...'
+            try:
+                requests.patch(
+                    url,
+                    json={"content": "⚠️ Có lỗi khi hiển thị bài viết này trên Discord (dữ liệu bài viết quá dài hoặc không hợp lệ)."},
+                    headers={"Content-Type": "application/json"},
+                    timeout=5,
+                )
+            except Exception:
+                pass
         else:
             logger.info(f"Trang thai Followup goc Discord: {resp.status_code}")
     except Exception as error:
@@ -413,6 +429,12 @@ def _send_new_followup(token: str, payload: dict):
     """
     if not APPLICATION_ID or not token:
         return
+
+    # Bảo vệ: Discord giới hạn message content tối đa 2000 ký tự
+    if "content" in payload and payload["content"] and len(payload["content"]) > 2000:
+        logger.warning(f"Followup bổ sung content quá dài ({len(payload['content'])} ký tự), tự động cắt ngắn về 2000.")
+        payload["content"] = payload["content"][:1996] + "..."
+
     url = f"https://discord.com/api/v10/webhooks/{APPLICATION_ID}/{token}"
     try:
         resp = requests.post(
@@ -460,16 +482,53 @@ def _build_stats_text(data: dict) -> tuple:
     return stats_bar, meta_bar
 
 
+def _process_threads_command(interaction: dict):
+    """
+    Hàm xử lý ngầm (Background Task) cho Slash Command /threads và /th.
+    """
+    token = interaction.get("token")
+    options = interaction.get("data", {}).get("options", [])
+    threads_url = next((o["value"] for o in options if o["name"] == "url"), None)
+
+    from threads_fetcher import ThreadsFetcher, ThreadsInvalidURLError, ThreadsPostNotFound
+    from threads_embed_builder import build_threads_payload_dict
+    import asyncio
+
+    fetcher = ThreadsFetcher()
+    try:
+        fetcher.validate_and_normalize_url(threads_url)
+    except ThreadsInvalidURLError as val_err:
+        _send_followup(token, {"content": f"⚠️ {str(val_err)}"})
+        return
+
+    try:
+        post = asyncio.run(fetcher.fetch_post(threads_url))
+        payload = build_threads_payload_dict(post)
+        _send_followup(token, payload)
+    except ThreadsPostNotFound:
+        _send_followup(token, {"content": "⚠️ Bài viết này không tồn tại, đã bị xóa hoặc đang ở chế độ riêng tư."})
+    except Exception as err:
+        logger.error(f"Lỗi khi xử lý lệnh Threads: {err}")
+        _send_followup(token, {"content": "⚠️ Đã xảy ra lỗi trong quá trình xử lý bài viết Threads này."})
+    finally:
+        try:
+            asyncio.run(fetcher.close())
+        except Exception:
+            pass
+
+
 def _process_slash_command(interaction: dict):
     """
-    Hàm xử lý ngầm (Background Task) cho Slash Command /fbembbed:
-    1. Trích xuất URL Facebook từ command options trong interaction data.
-    2. Kiểm tra tính hợp lệ của URL bằng regex.
-    3. Thu thập dữ liệu bài viết Facebook bằng hàm _fetch_fb_data (tốc độ cao).
-    4. Nếu là Video: Đặt link stream .mp4 với nhãn [▶️ Video](url) để kích hoạt Video Player trực tiếp.
-    5. Nếu là Bài viết: Đóng gói vào Embed (Khung viền màu xanh).
-    6. Gửi dữ liệu đã tạo qua Webhook Followup để hoàn tất lệnh.
+    Hàm xử lý ngầm (Background Task) cho Slash Commands (/fbembbed, /threads, /th):
+    1. Kiểm tra tên lệnh (/fbembbed hoặc /threads, /th).
+    2. Trích xuất URL từ options và kiểm tra hợp lệ.
+    3. Thu thập dữ liệu và đóng gói gửi Webhook Followup.
     """
+    cmd_name = (interaction.get("data", {}).get("name") or "").lower()
+    if cmd_name in ("threads", "th"):
+        _process_threads_command(interaction)
+        return
+
     token = interaction.get("token")
     options = interaction.get("data", {}).get("options", [])
     fb_url = next((o["value"] for o in options if o["name"] == "url"), None)
@@ -480,6 +539,7 @@ def _process_slash_command(interaction: dict):
             "content": "Link Facebook không hợp lệ. Vui lòng cung cấp link bài viết hoặc video Facebook hợp lệ."
         })
         return
+
 
     # 2. Thu thập dữ liệu từ Facebook tốc độ cao
     try:
@@ -495,127 +555,167 @@ def _process_slash_command(interaction: dict):
         })
         return
 
-    # 4. Tạo nút bấm dẫn link về bài viết gốc trên Facebook
-    components = [{
-        "type": 1,
-        "components": [{
-            "type": 2,
-            "label": "Xem trên Facebook",
-            "style": 5,
-            "url": data.get("url") or fb_url
+    try:
+        # 4. Tạo nút bấm dẫn link về bài viết gốc trên Facebook
+        components = [{
+            "type": 1,
+            "components": [{
+                "type": 2,
+                "label": "Xem trên Facebook",
+                "style": 5,
+                "url": data.get("url") or fb_url
+            }]
         }]
-    }]
 
-    # Xây dựng thanh tương tác và nguồn
-    stats_bar, meta_bar = _build_stats_text(data)
+        # Xây dựng thanh tương tác và nguồn
+        stats_bar, meta_bar = _build_stats_text(data)
 
-    # ==========================================================================
-    # TRƯỜNG HỢP 1: NẾU LÀ VIDEO -> GỬI CONTENT ĐỂ KÍCH HOẠT VIDEO PLAYER
-    # ==========================================================================
-    if data.get("video_url"):
-        header_parts = []
-        if data.get("author"):
-            header_parts.append(f"**{data['author']}**")
-        if data.get("title") and data.get("title") != data.get("author"):
-            header_parts.append(f"*{data['title']}*")
+        # ==========================================================================
+        # TRƯỜNG HỢP 1: NẾU LÀ VIDEO -> GỬI CONTENT ĐỂ KÍCH HOẠT VIDEO PLAYER
+        # ==========================================================================
+        if data.get("video_url"):
+            header_parts = []
+            if data.get("author"):
+                header_parts.append(f"**{data['author']}**")
+            if data.get("title") and data.get("title") != data.get("author"):
+                header_parts.append(f"*{data['title']}*")
 
-        caption = (data.get("description") or "").strip()
+            caption = (data.get("description") or "").strip()
 
-        content_lines = []
-        if header_parts:
-            content_lines.append(" • ".join(header_parts))
-        if caption:
-            content_lines.append(caption)
+            video_link = f"[▶️ Video]({data['video_url']})"
 
-        # Đặt thanh thống kê Like/Comment/Share và nguồn ở dưới nội dung
-        if stats_bar:
-            content_lines.append(stats_bar)
-        if meta_bar:
-            content_lines.append(meta_bar)
+            # Gom các phần cố định bên dưới (stats, meta, link video)
+            bottom_elements = []
+            if stats_bar:
+                bottom_elements.append(stats_bar)
+            if meta_bar:
+                bottom_elements.append(meta_bar)
+            bottom_elements.append(video_link)
+            bottom_text = "\n\n".join(bottom_elements)
 
-        # Đặt link stream .mp4 dưới dạng nhãn ngắn gọn [▶️ Video](url)
-        # Thay thế hoàn toàn dòng link 500 ký tự thô, đồng thời kích hoạt trình phát video HTML5 của Discord!
-        content_lines.append(f"[▶️ Video]({data['video_url']})")
+            header_text = " • ".join(header_parts)
 
-        _send_followup(token, {
-            "content": "\n\n".join(content_lines),
-            "components": components
-        })
-        return
+            # Giới hạn an toàn của Discord cho content là 2000 ký tự
+            overhead = (len(header_text) + 2 if header_text else 0) + len(bottom_text) + 2
+            max_caption_len = max(200, 1900 - overhead)
 
-    # ==========================================================================
-    # TRƯỜNG HỢP 2: BÀI VIẾT VĂN BẢN / ẢNH -> ĐÓNG GÓI TRONG EMBED KHUNG VIỀN
-    # ==========================================================================
-    full_text = (data.get("description") or "").strip()
-    text_chunks = _chunk_text(full_text, max_chunk_size=3800)
+            if len(caption) <= max_caption_len:
+                content_lines = []
+                if header_text:
+                    content_lines.append(header_text)
+                if caption:
+                    content_lines.append(caption)
+                content_lines.append(bottom_text)
 
-    author_name = data.get("author") or "Facebook"
-    author_info = {
-        "name": author_name[:256],
-        "url": data.get("url") or fb_url
-    }
+                _send_followup(token, {
+                    "content": "\n\n".join(content_lines),
+                    "components": components
+                })
+                return
 
-    stats_footer_section = f"\n\n{stats_bar}\n{meta_bar}"
+            # Nếu caption quá dài -> Chia nhỏ caption theo đoạn bằng _chunk_text
+            caption_chunks = _chunk_text(caption, max_chunk_size=max_caption_len)
+            total_parts = len(caption_chunks)
 
-    if not text_chunks:
-        embed = {
-            "title": (data.get("title") or "Bài viết Facebook")[:256],
-            "url": data.get("url") or fb_url,
-            "description": f"{stats_bar}\n{meta_bar}",
+            first_lines = []
+            if header_text:
+                first_lines.append(header_text)
+            if caption_chunks:
+                first_lines.append(caption_chunks[0])
+            first_lines.append(bottom_text)
+
+            _send_followup(token, {
+                "content": "\n\n".join(first_lines),
+                "components": components
+            })
+
+            # Gửi các phần caption tiếp theo qua tin nhắn Followup mới
+            for index in range(1, total_parts):
+                _send_new_followup(token, {
+                    "content": f"*(Phần {index + 1}/{total_parts})*\n\n{caption_chunks[index]}"
+                })
+            return
+
+        # ==========================================================================
+        # TRƯỜNG HỢP 2: BÀI VIẾT VĂN BẢN / ẢNH -> ĐÓNG GÓI TRONG EMBED KHUNG VIỀN
+        # ==========================================================================
+        full_text = (data.get("description") or "").strip()
+        text_chunks = _chunk_text(full_text, max_chunk_size=3800)
+
+        author_name = data.get("author") or "Facebook"
+        author_info = {
+            "name": author_name[:256],
+            "url": data.get("url") or fb_url
+        }
+
+        stats_footer_section = f"\n\n{stats_bar}\n{meta_bar}"
+
+        if not text_chunks:
+            embed = {
+                "title": (data.get("title") or "Bài viết Facebook")[:256],
+                "url": data.get("url") or fb_url,
+                "description": f"{stats_bar}\n{meta_bar}",
+                "color": 0x1877F2,
+                "author": author_info,
+            }
+            if data.get("image"):
+                embed["image"] = {"url": data["image"]}
+
+            _send_followup(token, {
+                "embeds": [embed],
+                "components": components
+            })
+            return
+
+        total_parts = len(text_chunks)
+
+        # Gửi Phần 1 vào Embed chính (@original)
+        first_desc = text_chunks[0]
+        if total_parts == 1:
+            first_desc += stats_footer_section
+
+        first_embed = {
+            "description": first_desc,
             "color": 0x1877F2,
             "author": author_info,
         }
-        if data.get("image"):
-            embed["image"] = {"url": data["image"]}
+        if data.get("title") and data.get("title") != author_name:
+            first_embed["title"] = data["title"][:256]
+
+        if total_parts > 1:
+            first_embed["footer"] = {"text": f"Phần 1/{total_parts}"}
+
+        if total_parts == 1 and data.get("image"):
+            first_embed["image"] = {"url": data["image"]}
 
         _send_followup(token, {
-            "embeds": [embed],
+            "embeds": [first_embed],
             "components": components
         })
-        return
 
-    total_parts = len(text_chunks)
+        # Nếu có các Phần tiếp theo (2, 3, 4...), gửi tiếp qua POST Followup Messages
+        for index in range(1, total_parts):
+            chunk_desc = text_chunks[index]
+            if index == total_parts - 1:
+                chunk_desc += stats_footer_section
 
-    # Gửi Phần 1 vào Embed chính (@original)
-    first_desc = text_chunks[0]
-    if total_parts == 1:
-        first_desc += stats_footer_section
+            followup_embed = {
+                "description": chunk_desc,
+                "color": 0x1877F2,
+                "footer": {"text": f"Phần {index + 1}/{total_parts}"}
+            }
+            if index == total_parts - 1 and data.get("image"):
+                followup_embed["image"] = {"url": data["image"]}
 
-    first_embed = {
-        "description": first_desc,
-        "color": 0x1877F2,
-        "author": author_info,
-    }
-    if data.get("title") and data.get("title") != author_name:
-        first_embed["title"] = data["title"][:256]
+            _send_new_followup(token, {
+                "embeds": [followup_embed]
+            })
 
-    if total_parts > 1:
-        first_embed["footer"] = {"text": f"Phần 1/{total_parts}"}
-
-    if total_parts == 1 and data.get("image"):
-        first_embed["image"] = {"url": data["image"]}
-
-    _send_followup(token, {
-        "embeds": [first_embed],
-        "components": components
-    })
-
-    # Nếu có các Phần tiếp theo (2, 3, 4...), gửi tiếp qua POST Followup Messages
-    for index in range(1, total_parts):
-        chunk_desc = text_chunks[index]
-        if index == total_parts - 1:
-            chunk_desc += stats_footer_section
-
-        followup_embed = {
-            "description": chunk_desc,
-            "color": 0x1877F2,
-            "footer": {"text": f"Phần {index + 1}/{total_parts}"}
-        }
-        if index == total_parts - 1 and data.get("image"):
-            followup_embed["image"] = {"url": data["image"]}
-
-        _send_new_followup(token, {
-            "embeds": [followup_embed]
+    except Exception as err:
+        logger.error(f"Loi bat ngo khi dong goi va gui tin nhan: {err}")
+        logger.error(traceback.format_exc())
+        _send_followup(token, {
+            "content": "⚠️ Đã xảy ra lỗi trong quá trình xử lý bài viết Facebook này. Vui lòng thử lại sau."
         })
 
 

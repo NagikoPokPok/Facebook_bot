@@ -1,8 +1,8 @@
 # FACEBOOK & THREADS EMBED DISCORD BOT (HYBRID ARCHITECTURE)
 > Bot Discord tự động nhúng và trích xuất nội dung bài viết, video từ **Facebook** và **Threads (Meta)** dưới dạng Rich Embeds chuẩn nhận diện thương hiệu, hỗ trợ cả kiến trúc Serverless trên AWS Lambda và Discord.py Cog.
 
-**Phiên bản:** 2.2.1 (Hotfix Mobile Share Links)  
-**Ngày cập nhật cuối (Last Updated):** 2026-09-10  
+**Phiên bản:** 2.3.1 (Video Native Embed & Advanced Facebook Stats Extraction Engine)  
+**Ngày cập nhật cuối (Last Updated):** 2026-09-16  
 **Runtime:** Python 3.12+ (AWS Lambda x86_64 / Local Gateway)
 
 ---
@@ -14,10 +14,13 @@
    - Tự động fallback sang `yt-dlp` cho các video phức tạp.
    - Hiển thị thống kê tương tác (Likes, Comments, Shares) và giao diện Embed khung xanh Facebook (`0x1877F2`).
 2. **Nhúng bài viết Threads (`/threads [url]` hoặc alias `/th [url]`):**
-   - **Hỗ trợ mọi định dạng URL:** Chuẩn hóa toàn bộ URL bài viết (`@user/post/xxxx`), liên kết rút gọn (`/t/xxxx`, `/post/xxxx`) và **liên kết chia sẻ từ ứng dụng di động** (`/share/xxxx` với HTTP 302 Pre-Resolution).
+   - **Bóc tách ảnh gốc sạch (Clean Media SSR):** Trích xuất trực tiếp ảnh gốc độ phân giải cao (`t51.*-15`, 648x648, 720x720, 1080x1080 uncropped) từ SSR Relay Tree.
+   - **Loại bỏ thẻ Share Card tổng hợp:** Tự động phát hiện và loại bỏ card `t39.92108-6` của Meta (vốn bị in đè text và cắt xén hình ảnh).
+   - **Nhận diện Avatar chuẩn xác:** Cào avatar sắc nét từ CDN Instagram qua handle hoặc `og:url` fallback, phân biệt rõ avatar asset (`-19`) và post media (`-15`).
+   - **Hỗ trợ mọi định dạng URL:** Chuẩn hóa toàn bộ URL bài viết (`@user/post/xxxx`), liên kết rút gọn (`/t/xxxx`, `/post/xxxx`) và liên kết chia sẻ di động (`/share/xxxx` với HTTP 302 Pre-Resolution).
    - **Layered Fallback 3 tầng:** Fast-Path Meta Scraper (`facebookexternalhit/1.1`) -> Tokenless Official oEmbed (`graph.threads.net/oembed`) -> Graceful Minimal Fallback.
    - **SSRF Protection:** Whitelist nghiêm ngặt tên miền (`threads.net`, `threads.com`).
-   - **In-Memory TTL Caching:** Lưu bộ nhớ đệm kép (10 phút cho Post, 1 giờ cho Avatar tác giả) chống rate-limit.
+   - **Bộ đệm thông minh Zero-Overhead:** In-memory TTL Cache (10 phút cho Post, 1 giờ cho Avatar, 60 giây cho Profile HTML) chống rate-limit và tối ưu chi phí Lambda.
    - **Discord Image Gallery Grid:** Tự động chia bài viết nhiều ảnh (carousel) thành tối đa 4 embeds cùng URL để Discord hiển thị lưới ảnh trực quan.
    - **Dark Theme Chuẩn Threads:** Embed tông màu `#101010` kèm nút bấm `🔗 Xem bài viết gốc` và `👤 Xem trang cá nhân`.
 
@@ -70,18 +73,19 @@ Facebook_bot/
 │   └── threads_embed.py        # Cog slash command /threads & /th cho bot discord.py
 ├── requirements-lambda.txt     # Danh sách thư viện tối giản đóng gói lên Lambda
 ├── requirements.txt            # Danh sách thư viện đầy đủ cho môi trường dev local
-├── tests/                      # Thư mục kiểm thử tự động (62 Pytest Cases)
+├── tests/                      # Thư mục kiểm thử tự động (88 Pytest Cases - 100% Pass)
 │   ├── __init__.py
 │   ├── conftest.py             # Fixtures sinh khóa Ed25519 & mock biến môi trường
 │   ├── test_fast_path.py       # [v2.1] Kiểm thử bóc tách Fast-Path & Fallback yt-dlp
 │   ├── test_helpers.py         # [v2.1] Kiểm thử format số, thời gian, chunk văn bản, regex URL
 │   ├── test_security_and_discord.py # [v2.1] Kiểm thử xác thực chữ ký số & routing HTTP
 │   ├── test_slash_command.py   # [v2.1] Kiểm thử xử lý interaction slash command Facebook
-│   └── test_threads.py         # [v2.2] Kiểm thử slash command Threads, SSRF, Cache, Fallback
+│   └── test_threads.py         # [v2.2 & v2.3] Kiểm thử Threads SSR, Clean Media, Card Filtering, Avatar
 ├── docs/                       # Thư mục tài liệu kỹ thuật
 │   ├── UPDATE_PATCH_v2.1.md    # Báo cáo chi tiết bản cập nhật tối ưu hóa v2.1.0
 │   ├── UPDATE_PATCH_v2.2.md    # Báo cáo chi tiết bản cập nhật tính năng Threads v2.2.0
-│   └── TEST_CASES.md           # Đặc tả chi tiết 62 test cases kiểm thử tự động
+│   ├── UPDATE_PATCH_v2.3.md    # Báo cáo chi tiết bản cập nhật Clean Media SSR & Card Filtering v2.3.0
+│   └── TEST_CASES.md           # Đặc tả chi tiết test cases kiểm thử tự động
 └── embed_card/                 # Web component & Media Proxy phục vụ giao diện preview
 ```
 
@@ -128,7 +132,7 @@ Sau khi hoàn tất, script sẽ in ra URL công khai. Cung cấp URL này vào 
 
 ## 4. HƯỚNG DẪN KIỂM THỬ (TESTING GUIDE)
 
-Hệ thống sử dụng `pytest` với 69 test cases tự động, không phụ thuộc vào kết nối mạng ngoài hay dữ liệu tĩnh:
+Hệ thống sử dụng `pytest` với **88 test cases** tự động, không phụ thuộc vào kết nối mạng ngoài hay dữ liệu tĩnh:
 
 ```powershell
 # Kích hoạt môi trường ảo và chạy toàn bộ kiểm thử
@@ -136,12 +140,21 @@ Hệ thống sử dụng `pytest` với 69 test cases tự động, không phụ
 
 # Kiểm tra độ bao phủ hoặc chạy riêng từng module
 .\.venv\Scripts\pytest -v tests/test_fast_path.py
-.\.venv\Scripts\pytest -v tests/test_security_and_discord.py
+.\.venv\Scripts\pytest -v tests/test_slash_command.py
+.\.venv\Scripts\pytest -v tests/test_threads.py
 ```
 
 ---
 
-## 5. ĐĂNG KÝ SLASH COMMAND VỚI DISCORD
+## 5. TÀI LIỆU BẢN VÁ & NÂNG CẤP (PATCH NOTES)
+
+- [Bản vá v2.3.1 (Video Native Embed & Advanced Facebook Stats)](docs/UPDATE_PATCH_v2.3.1.md)
+- [Bản vá v2.2.0 & v2.2.1 (Threads Embed Slash Command)](docs/UPDATE_PATCH_v2.2.md)
+- [Bản vá v2.1.0 (Cold Start & Performance Tuning)](docs/UPDATE_PATCH_v2.1.md)
+
+---
+
+## 6. ĐĂNG KÝ SLASH COMMAND VỚI DISCORD
 
 Để đăng ký hoặc cập nhật Slash Command `/fbembbed` với Discord API, chạy:
 

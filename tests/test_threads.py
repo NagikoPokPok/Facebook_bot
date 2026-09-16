@@ -199,6 +199,210 @@ class TestThreadsFetcher:
         assert m.group("name") == "Dây Chun"
         assert m.group("handle") == "daychun5"
 
+    async def test_handle_only_title_parsing(self):
+        from threads_fetcher import TITLE_HANDLE_ONLY_REGEX
+        cases = [
+            ("@xmawmx trên Threads", "xmawmx"),
+            ("@xmawmx • Threads", "xmawmx"),
+            ("xmawmx on Threads", "xmawmx"),
+            ("@zuck - Threads", "zuck"),
+        ]
+        for title, expected in cases:
+            m = TITLE_HANDLE_ONLY_REGEX.match(title)
+            assert m is not None, f"Failed on title: {title}"
+            assert m.group("handle") == expected
+
+    async def test_og_scrape_handle_fallback_from_og_url(self):
+        fetcher = ThreadsFetcher()
+        url = "https://www.threads.com/share/test1234"
+        html = """
+        <html>
+        <head>
+            <meta property="og:title" content="Threads" />
+            <meta property="og:description" content="Một chữ hả thiệt lớn" />
+            <meta property="og:url" content="https://www.threads.net/@xmawmx/post/test1234" />
+            <meta property="og:image" content="https://example.com/card.jpg" />
+        </head>
+        </html>
+        """
+        mock_resp = MagicMock()
+        mock_resp.status = 200
+        mock_resp.url = "https://www.threads.net/@xmawmx/post/test1234"
+        mock_resp.text = AsyncMock(return_value=html)
+
+        mock_session = MagicMock()
+        mock_session.get.return_value.__aenter__.return_value = mock_resp
+        mock_session.closed = False
+        mock_session.close = AsyncMock()
+        fetcher._session = mock_session
+
+        with patch.object(fetcher, "_get_author_avatar", new_callable=AsyncMock) as mock_avatar:
+            mock_avatar.return_value = "https://cdn.example.com/avatar.jpg"
+            post = await fetcher._fetch_og_scrape("https://www.threads.net/share/test1234", None, "test1234")
+            assert post.author_handle == "xmawmx"
+            assert post.author_name == "xmawmx"
+            assert post.author_avatar_url == "https://cdn.example.com/avatar.jpg"
+            mock_avatar.assert_called_once_with("xmawmx")
+
+        await fetcher.close()
+
+    async def test_is_synthesized_card_detection(self):
+        synthesized_url = (
+            "https://scontent.fdad4-1.fna.fbcdn.net/v/t39.92108-6/"
+            "811534939_1616065136672922_8055016116524971875_n.jpg?_nc_cat=109"
+        )
+        clean_photo_url = (
+            "https://instagram.fdad4-1.fna.fbcdn.net/v/t51.82787-15/"
+            "811405250_18089658386378584_887674151234702559_n.jpg?stp=dst-jpg"
+        )
+        normal_url = "https://example.com/photos/image.jpg"
+
+        assert ThreadsFetcher._is_synthesized_card(synthesized_url) is True
+        assert ThreadsFetcher._is_synthesized_card(clean_photo_url) is False
+        assert ThreadsFetcher._is_synthesized_card(normal_url) is False
+        assert ThreadsFetcher._is_synthesized_card("") is False
+
+    async def test_is_avatar_asset_detection(self):
+        avatar_url_19 = "https://scontent.cdninstagram.com/v/t51.82787-19/747736304_n.jpg"
+        avatar_url_2885 = "https://scontent.cdninstagram.com/v/t51.2885-19/573323465_n.jpg"
+        post_photo_url_15 = "https://scontent.cdninstagram.com/v/t51.82787-15/811405250_n.jpg"
+
+        assert ThreadsFetcher._is_avatar_asset(avatar_url_19) is True
+        assert ThreadsFetcher._is_avatar_asset(avatar_url_2885) is True
+        assert ThreadsFetcher._is_avatar_asset(post_photo_url_15) is False
+        assert ThreadsFetcher._is_avatar_asset("https://example.com/pic.jpg") is False
+
+    async def test_extract_clean_images_from_ssr_single_post(self):
+        mock_ssr_html = r"""
+        <script>
+        requireLazy(["ServerJS"], function(s) {
+            s.handle({
+                "code":"DdTstebmIRd",
+                "image_versions2":{
+                    "candidates":[
+                        {"height":905,"url":"https:\/\/instagram.fna.fbcdn.net\/v\/t51.82787-15\/811405250_18089658386378584_887674151234702559_n.jpg?stp=dst-jpg_e35_tt6\u00253D\u00253D","width":648},
+                        {"height":670,"url":"https:\/\/instagram.fna.fbcdn.net\/v\/t51.82787-15\/811405250_18089658386378584_887674151234702559_n.jpg?stp=p480x480","width":480}
+                    ]
+                }
+            });
+        });
+        </script>
+        """
+        images = ThreadsFetcher._extract_clean_images_from_ssr(mock_ssr_html, "DdTstebmIRd")
+        assert len(images) == 1
+        assert "811405250_18089658386378584_887674151234702559_n.jpg" in images[0]
+        # Should pick the higher resolution candidate (score 650 > 480)
+        assert "dst-jpg_e35_tt6" in images[0]
+
+    async def test_extract_clean_images_from_ssr_carousel_post(self):
+        mock_ssr_html = r"""
+        <script>
+        requireLazy(["ServerJS"], function(s) {
+            s.handle({
+                "carousel_media":[
+                    {
+                        "image_versions2":{
+                            "candidates":[
+                                {"height":720,"url":"https:\/\/instagram.fna.fbcdn.net\/v\/t51.82787-15\/item1_18087996260378584_n.jpg?stp=s720x720","width":720},
+                                {"height":320,"url":"https:\/\/instagram.fna.fbcdn.net\/v\/t51.82787-15\/item1_18087996260378584_n.jpg?stp=s320x320","width":320}
+                            ]
+                        }
+                    },
+                    {
+                        "image_versions2":{
+                            "candidates":[
+                                {"height":720,"url":"https:\/\/instagram.fna.fbcdn.net\/v\/t51.82787-15\/item2_18087996269378584_n.jpg?stp=s720x720","width":720}
+                            ]
+                        }
+                    }
+                ],
+                "code":"Dc_WK_UGGoO"
+            });
+        });
+        </script>
+        """
+        images = ThreadsFetcher._extract_clean_images_from_ssr(mock_ssr_html, "Dc_WK_UGGoO")
+        assert len(images) == 2
+        assert "item1_" in images[0]
+        assert "item2_" in images[1]
+        assert "s720x720" in images[0]
+
+    async def test_og_scrape_replaces_synthesized_card_with_clean_images(self):
+        fetcher = ThreadsFetcher()
+        url = "https://www.threads.net/@kristina_ha02/post/DdTstebmIRd"
+        html = """
+        <html>
+        <head>
+            <meta property="og:title" content="kristina_ha02 on Threads" />
+            <meta property="og:description" content="đừng hỏi vì sao Trường Giang bị phốt" />
+            <meta property="og:url" content="https://www.threads.net/@kristina_ha02/post/DdTstebmIRd" />
+            <meta property="og:image" content="https://scontent.fna.fbcdn.net/v/t39.92108-6/synthesized_card.jpg" />
+        </head>
+        </html>
+        """
+        mock_resp = MagicMock()
+        mock_resp.status = 200
+        mock_resp.url = url
+        mock_resp.text = AsyncMock(return_value=html)
+
+        mock_session = MagicMock()
+        mock_session.get.return_value.__aenter__.return_value = mock_resp
+        mock_session.closed = False
+        mock_session.close = AsyncMock()
+        fetcher._session = mock_session
+
+        clean_img = "https://instagram.fna.fbcdn.net/v/t51.82787-15/clean_photo.jpg"
+        with patch.object(fetcher, "_get_clean_post_images", new_callable=AsyncMock) as mock_clean, \
+             patch.object(fetcher, "_get_author_avatar", new_callable=AsyncMock) as mock_avatar:
+            mock_clean.return_value = [clean_img]
+            mock_avatar.return_value = "https://scontent.fna.fbcdn.net/v/t51.82787-19/avatar.jpg"
+
+            post = await fetcher._fetch_og_scrape(url, "kristina_ha02", "DdTstebmIRd")
+            assert len(post.image_urls) == 1
+            assert post.image_urls[0] == clean_img
+            # Synthesized card must NOT be present
+            assert "synthesized_card.jpg" not in post.image_urls
+
+        await fetcher.close()
+
+    async def test_og_scrape_ignores_synthesized_card_for_text_post(self):
+        fetcher = ThreadsFetcher()
+        url = "https://www.threads.net/@zuck/post/CuZsgfWLyiI"
+        html = """
+        <html>
+        <head>
+            <meta property="og:title" content="Mark Zuckerberg (@zuck) on Threads" />
+            <meta property="og:description" content="70 million sign ups on Threads as of this morning." />
+            <meta property="og:url" content="https://www.threads.net/@zuck/post/CuZsgfWLyiI" />
+            <meta property="og:image" content="https://scontent.fna.fbcdn.net/v/t39.92108-6/synthesized_card.jpg" />
+        </head>
+        </html>
+        """
+        mock_resp = MagicMock()
+        mock_resp.status = 200
+        mock_resp.url = url
+        mock_resp.text = AsyncMock(return_value=html)
+
+        mock_session = MagicMock()
+        mock_session.get.return_value.__aenter__.return_value = mock_resp
+        mock_session.closed = False
+        mock_session.close = AsyncMock()
+        fetcher._session = mock_session
+
+        with patch.object(fetcher, "_get_clean_post_images", new_callable=AsyncMock) as mock_clean, \
+             patch.object(fetcher, "_get_author_avatar", new_callable=AsyncMock) as mock_avatar:
+            mock_clean.return_value = []
+            mock_avatar.return_value = "https://scontent.fna.fbcdn.net/v/t51.82787-19/avatar.jpg"
+
+            post = await fetcher._fetch_og_scrape(url, "zuck", "CuZsgfWLyiI")
+            # ponytail: card is kept as fallback when no clean images — bad image > no image
+            assert len(post.image_urls) == 1
+            assert "t39.92108-6" in post.image_urls[0]
+            assert post.author_avatar_url == "https://scontent.fna.fbcdn.net/v/t51.82787-19/avatar.jpg"
+
+        await fetcher.close()
+
+
 
 # ==============================================================================
 # 3. EMBED BUILDER UI/UX SPEC TESTS
@@ -311,6 +515,24 @@ class TestThreadsEmbedBuilder:
         assert len(payload["embeds"]) == 1
         assert payload["components"][0]["type"] == 1  # Action Row
         assert payload["components"][0]["components"][0]["label"] == "🔗 Xem bài viết gốc"
+
+    def test_threads_icon_url_is_valid_png(self):
+        from threads_embed_builder import THREADS_ICON_URL
+        assert THREADS_ICON_URL.endswith(".png")
+        assert not THREADS_ICON_URL.endswith(".ico")
+
+    def test_author_formatting_single_handle(self):
+        post = ThreadsPost(
+            author_name="xmawmx",
+            author_handle="xmawmx",
+            author_avatar_url="https://cdn.example.com/avatar.jpg",
+            text="Single handle formatting test",
+            post_url="https://www.threads.net/@xmawmx/post/123",
+        )
+        embeds, _ = build_threads_embeds(post)
+        assert embeds[0].author.name == "@xmawmx"
+        assert embeds[0].author.icon_url == "https://cdn.example.com/avatar.jpg"
+
 
 
 # ==============================================================================

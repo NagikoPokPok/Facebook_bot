@@ -143,11 +143,16 @@ def _format_count(count_value) -> str:
     if count_value is None:
         return None
     if isinstance(count_value, str):
-        cleaned = count_value.replace(",", "").replace(".", "").strip()
+        val = count_value.strip()
+        # ponytail: Chuẩn hóa số đã rút gọn có dấu phẩy/chấm (ví dụ 4,3K -> 4.3K)
+        m_short = re.match(r"^(\d+)[,\.](\d+)\s*([KkMmBb])$", val)
+        if m_short:
+            return f"{m_short.group(1)}.{m_short.group(2)}{m_short.group(3).upper()}"
+        cleaned = val.replace(",", "").replace(".", "")
         if cleaned.isdigit():
             count_value = int(cleaned)
         else:
-            return count_value.strip()
+            return val
     try:
         num = int(count_value)
         if num >= 1_000_000:
@@ -157,6 +162,127 @@ def _format_count(count_value) -> str:
         return str(num)
     except (ValueError, TypeError):
         return str(count_value)
+
+
+# ponytail: Bộ lọc các cụm từ login wall/yêu cầu đăng nhập của Facebook
+LOGIN_WALL_PHRASES = [
+    "log in or sign up to view",
+    "đăng nhập hoặc đăng ký để xem",
+    "see posts, photos and more on facebook",
+    "xem bài viết, ảnh và nội dung khác trên facebook",
+    "xem bài viết, ảnh và nội dung khác",
+    "error facebook",
+    "log in to facebook",
+    "đăng nhập facebook",
+]
+
+
+def is_login_wall_text(text: str) -> bool:
+    """
+    ponytail: Kiểm tra chuỗi có chứa các câu thông báo yêu cầu đăng nhập của Facebook hay không.
+    """
+    if not text:
+        return False
+    lower = text.lower().strip()
+    return any(phrase in lower for phrase in LOGIN_WALL_PHRASES)
+
+
+def parse_stats_from_text(text: str) -> dict:
+    """
+    ponytail: Bóc tách chỉ số tương tác (views, likes, comments, shares) từ chuỗi văn bản hoặc tiêu đề Facebook.
+    """
+    stats = {}
+    if not text or is_login_wall_text(text):
+        return stats
+
+    # Lượt thích / Cảm xúc
+    m_likes = re.search(
+        r"([\d]+(?:[.,]\d+)?[KkMmBb]?)\s*(?:cảm xúc|lượt thích|thích|reactions?|likes?)",
+        text,
+        re.IGNORECASE,
+    )
+    if m_likes:
+        stats["likes"] = m_likes.group(1).strip()
+
+    # Bình luận
+    m_comments = re.search(
+        r"([\d]+(?:[.,]\d+)?[KkMmBb]?)\s*(?:bình luận|comments?|cmt)",
+        text,
+        re.IGNORECASE,
+    )
+    if m_comments:
+        stats["comments"] = m_comments.group(1).strip()
+
+    # Chia sẻ
+    m_shares = re.search(
+        r"([\d]+(?:[.,]\d+)?[KkMmBb]?)\s*(?:lượt chia sẻ|chia sẻ|shares?|reposts?)",
+        text,
+        re.IGNORECASE,
+    )
+    if m_shares:
+        stats["shares"] = m_shares.group(1).strip()
+
+    # Lượt xem
+    m_views = re.search(
+        r"([\d]+(?:[.,]\d+)?[KkMmBb]?)\s*(?:lượt xem|views?|lượt phát|plays?)",
+        text,
+        re.IGNORECASE,
+    )
+    if m_views:
+        stats["views"] = m_views.group(1).strip()
+
+    return stats
+
+
+def parse_fb_title(raw_title: str) -> dict:
+    """
+    ponytail: Phân tích cú pháp tiêu đề Facebook để tách tác giả, bài viết gốc và chỉ số tương tác.
+    Ví dụ: '515K lượt xem · 4,3K cảm xúc | Nội dung video... | KodeKloud'
+    """
+    res = {"author": None, "title": None, "description": None, "stats": {}}
+    if not raw_title:
+        return res
+
+    if is_login_wall_text(raw_title):
+        return res
+
+    parts = [p.strip() for p in raw_title.split(" | ") if p.strip()]
+    first_stats = parse_stats_from_text(parts[0]) if parts else {}
+
+    if len(parts) >= 3:
+        if first_stats:
+            res["stats"] = first_stats
+            res["author"] = parts[-1]
+            middle = " | ".join(parts[1:-1])
+            if len(middle) > 120 or "\n" in middle:
+                res["description"] = middle
+            else:
+                res["title"] = middle
+        else:
+            res["title"] = parts[0]
+            res["author"] = parts[-1]
+    elif len(parts) == 2:
+        if first_stats:
+            res["stats"] = first_stats
+            res["author"] = parts[1]
+        else:
+            res["title"] = parts[0]
+            res["author"] = parts[1]
+    elif len(parts) == 1:
+        if first_stats:
+            res["stats"] = first_stats
+        else:
+            res["title"] = parts[0]
+
+    # Loại trừ nếu author rơi vào các từ khóa rác hoặc login wall
+    if res.get("author") and (
+        is_login_wall_text(res["author"])
+        or res["author"].lower() in ("facebook", "watch", "reel", "error")
+    ):
+        res["author"] = None
+
+    return res
+
 
 
 def _format_time_ago(ts) -> str:
@@ -264,10 +390,29 @@ def _fetch_fb_data(url: str) -> dict:
         og_image = og("og:image")
         og_video = og("og:video") or og("og:video:secure_url") or og("og:video:url")
 
-        invalid_titles = ["error", "error facebook", "facebook", "đăng nhập hoặc đăng ký để xem"]
-        if og_title and og_title.lower() not in invalid_titles:
-            data["title"] = data["title"] or og_title
-            data["author"] = data["author"] or og_title
+        if og_title and not is_login_wall_text(og_title):
+            parsed_title = parse_fb_title(og_title)
+            if parsed_title.get("author"):
+                data["author"] = data["author"] or parsed_title["author"]
+            if parsed_title.get("title"):
+                data["title"] = data["title"] or parsed_title["title"]
+            if parsed_title.get("description"):
+                data["description"] = data["description"] or parsed_title["description"]
+            for k, v in parsed_title.get("stats", {}).items():
+                if v and not data.get(k):
+                    data[k] = v
+            if not data["title"] and not parsed_title.get("author"):
+                data["title"] = og_title
+            if not data["author"] and data["title"]:
+                data["author"] = data["title"]
+
+        if og_desc and not is_login_wall_text(og_desc):
+            desc_stats = parse_stats_from_text(og_desc)
+            for k, v in desc_stats.items():
+                if v and not data.get(k):
+                    data[k] = v
+            if not data["description"]:
+                data["description"] = og_desc
 
         data["image"] = data["image"] or og_image
         data["url"] = str(resp.url)
@@ -298,31 +443,51 @@ def _fetch_fb_data(url: str) -> dict:
         for match in matches:
             try:
                 decoded = json.loads(f'"{match}"')
-                if len(decoded) > len(longest_text):
+                if len(decoded) > len(longest_text) and not is_login_wall_text(decoded):
                     longest_text = decoded
             except Exception:
                 pass
 
         if longest_text:
             data["description"] = longest_text
-        elif og_desc and "xem bài viết, ảnh và nội dung khác" not in og_desc.lower():
-            data["description"] = og_desc
+        elif og_desc and not is_login_wall_text(og_desc):
+            data["description"] = data["description"] or og_desc
 
-        # Trích xuất số liệu likes/comments/shares và creation_time từ HTML JSON
+        # ponytail: Trích xuất chỉ số tương tác (likes, comments, shares) từ HTML/JSON
         if not data["likes"]:
-            rx_reactions = re.findall(r'"reaction_count"\s*:\s*\{\s*"count"\s*:\s*(\d+)\}', html)
-            if rx_reactions:
-                data["likes"] = rx_reactions[0]
+            rx_i18n_likes = re.findall(r'"i18n_reaction_count"\s*:\s*"([^"]+)"', html)
+            if rx_i18n_likes:
+                data["likes"] = rx_i18n_likes[0]
+            else:
+                rx_reactions = re.findall(r'"reaction_count"\s*:\s*\{\s*"count"\s*:\s*(\d+)\}', html)
+                if rx_reactions:
+                    data["likes"] = rx_reactions[0]
+                else:
+                    rx_react_num = re.findall(r'"reaction_count"\s*:\s*(\d+)', html)
+                    if rx_react_num:
+                        data["likes"] = rx_react_num[0]
 
-        if not data["comments"]:
-            rx_comments = re.findall(r'"(?:total_comment_count|total_count)"\s*:\s*(\d+)', html)
-            if rx_comments:
-                data["comments"] = rx_comments[0]
+        if not data["comments"] or str(data["comments"]) in ("0", ""):
+            rx_i18n_cmt = re.findall(r'"i18n_comment_count"\s*:\s*"([^"]+)"', html)
+            if rx_i18n_cmt:
+                data["comments"] = rx_i18n_cmt[0]
+            else:
+                rx_cmt_count = re.findall(r'"comment_count"\s*:\s*\{\s*"total_count"\s*:\s*(\d+)\}', html)
+                if rx_cmt_count and rx_cmt_count[0] != "0":
+                    data["comments"] = rx_cmt_count[0]
+                else:
+                    rx_comments = re.findall(r'"total_comment_count"\s*:\s*(\d+)', html)
+                    if rx_comments and rx_comments[0] != "0":
+                        data["comments"] = rx_comments[0]
 
-        if not data["shares"]:
-            rx_shares = re.findall(r'"share_count"\s*:\s*\{\s*"count"\s*:\s*(\d+)\}', html)
-            if rx_shares:
-                data["shares"] = rx_shares[0]
+        if not data["shares"] or str(data["shares"]) in ("0", ""):
+            rx_i18n_share = re.findall(r'"i18n_share_count"\s*:\s*"([^"]+)"', html)
+            if rx_i18n_share:
+                data["shares"] = rx_i18n_share[0]
+            else:
+                rx_shares = re.findall(r'"share_count"\s*:\s*\{\s*"count"\s*:\s*(\d+)\}', html)
+                if rx_shares:
+                    data["shares"] = rx_shares[0]
 
         if not data["timestamp"]:
             rx_time = re.findall(r'"(?:creation_time|publish_time)"\s*:\s*(\d{10})', html)
@@ -350,25 +515,32 @@ def _fetch_fb_data(url: str) -> dict:
                 info = ydl.extract_info(url, download=False)
                 if info:
                     raw_title = info.get("title") or ""
-                    data["author"] = data["author"] or info.get("uploader") or info.get("channel")
-                    data["description"] = data["description"] or info.get("description")
+                    parsed_yt = parse_fb_title(raw_title)
+                    data["author"] = data["author"] or parsed_yt.get("author") or info.get("uploader") or info.get("channel")
+                    data["description"] = data["description"] or parsed_yt.get("description") or info.get("description")
                     data["image"] = data["image"] or info.get("thumbnail")
                     data["video_url"] = data["video_url"] or info.get("url")
                     if info.get("webpage_url"):
                         data["url"] = info.get("webpage_url")
 
-                    data["likes"] = data["likes"] or info.get("like_count")
-                    data["comments"] = data["comments"] or info.get("comment_count")
-                    data["shares"] = data["shares"] or info.get("repost_count") or info.get("share_count")
+                    yt_stats = parsed_yt.get("stats", {})
+                    data["likes"] = data["likes"] or yt_stats.get("likes") or info.get("like_count")
+                    data["comments"] = data["comments"] or yt_stats.get("comments") or info.get("comment_count")
+                    data["shares"] = data["shares"] or yt_stats.get("shares") or info.get("repost_count") or info.get("share_count")
                     data["timestamp"] = data["timestamp"] or info.get("timestamp") or info.get("upload_date")
 
-                    if " | " in raw_title:
-                        parts = raw_title.split(" | ")
-                        data["title"] = data["title"] or (parts[1] if len(parts) > 1 else parts[0])
-                    elif not data["title"]:
-                        data["title"] = raw_title
+                    if not data["title"]:
+                        data["title"] = parsed_yt.get("title") or (raw_title if not is_login_wall_text(raw_title) else None)
         except Exception as error:
             logger.warning(f"yt-dlp fallback failed: {error}")
+
+    # ponytail: Dọn dẹp dứt điểm các chuỗi thông báo login wall nếu còn sót lại
+    if is_login_wall_text(data.get("title")):
+        data["title"] = None
+    if is_login_wall_text(data.get("description")):
+        data["description"] = None
+    if is_login_wall_text(data.get("author")):
+        data["author"] = None
 
     return data
 
@@ -571,68 +743,71 @@ def _process_slash_command(interaction: dict):
         stats_bar, meta_bar = _build_stats_text(data)
 
         # ==========================================================================
-        # TRƯỜNG HỢP 1: NẾU LÀ VIDEO -> GỬI CONTENT ĐỂ KÍCH HOẠT VIDEO PLAYER
+        # TRƯỜNG HỢP 1: NẾU LÀ VIDEO -> ĐÓNG KHUNG BLOCKQUOTE ĐỂ DISCORD PHÁT VIDEO NATIVE
+        # (Lưu ý: Không gửi 'embeds' cho video vì Discord API sẽ chặn trình phát HTML5 Video
+        # và chỉ hiển thị 1 ảnh tĩnh thumbnail khiến video bị mất).
         # ==========================================================================
         if data.get("video_url"):
-            header_parts = []
-            if data.get("author"):
-                header_parts.append(f"**{data['author']}**")
-            if data.get("title") and data.get("title") != data.get("author"):
-                header_parts.append(f"*{data['title']}*")
-
+            author_name = data.get("author") or "Facebook"
             caption = (data.get("description") or "").strip()
+            title = (data.get("title") or "").strip()
+
+            # ponytail: Xây dựng thanh footer thống kê tương tác
+            meta_elements = []
+            if stats_bar:
+                meta_elements.append(stats_bar)
+            meta_elements.append("Facebook")
+            time_ago = _format_time_ago(data.get("timestamp"))
+            if time_ago:
+                meta_elements.append(time_ago)
+            meta_line = " • ".join(meta_elements)
+
+            # ponytail: Chuẩn bị nội dung đóng khung bằng blockquote (>)
+            # Discord Markdown blockquote (>) tạo viền dọc bên trái đẹp như Embed
+            # mà vẫn bảo toàn 100% khả năng kích hoạt Trình phát Video HTML5 của Discord.
+            lines = []
+            if author_name:
+                header = f"**{author_name}**"
+                if title and title != author_name and len(title) <= 120 and title not in caption:
+                    header += f" — *{title}*"
+                lines.append(header)
+            elif title:
+                lines.append(f"**{title}**")
 
             video_link = f"[▶️ Video]({data['video_url']})"
+            # Dành chỗ an toàn cho header, stats, video link (khoảng 350 ký tự)
+            max_caption_len = 1600
 
-            # Gom các phần cố định bên dưới (stats, meta, link video)
-            bottom_elements = []
-            if stats_bar:
-                bottom_elements.append(stats_bar)
-            if meta_bar:
-                bottom_elements.append(meta_bar)
-            bottom_elements.append(video_link)
-            bottom_text = "\n\n".join(bottom_elements)
+            caption_chunks = _chunk_text(caption, max_chunk_size=max_caption_len) if caption else []
+            first_caption = caption_chunks[0] if caption_chunks else ""
 
-            header_text = " • ".join(header_parts)
+            if first_caption:
+                lines.append(first_caption)
+            if meta_line:
+                lines.append(meta_line)
 
-            # Giới hạn an toàn của Discord cho content là 2000 ký tự
-            overhead = (len(header_text) + 2 if header_text else 0) + len(bottom_text) + 2
-            max_caption_len = max(200, 1900 - overhead)
+            framed_lines = []
+            for item in lines:
+                for subline in item.split("\n"):
+                    framed_lines.append(f"> {subline}" if subline.strip() else ">")
 
-            if len(caption) <= max_caption_len:
-                content_lines = []
-                if header_text:
-                    content_lines.append(header_text)
-                if caption:
-                    content_lines.append(caption)
-                content_lines.append(bottom_text)
+            framed_content = "\n".join(framed_lines)
+            content = f"{framed_content}\n\n{video_link}"
 
-                _send_followup(token, {
-                    "content": "\n\n".join(content_lines),
-                    "components": components
-                })
-                return
-
-            # Nếu caption quá dài -> Chia nhỏ caption theo đoạn bằng _chunk_text
-            caption_chunks = _chunk_text(caption, max_chunk_size=max_caption_len)
-            total_parts = len(caption_chunks)
-
-            first_lines = []
-            if header_text:
-                first_lines.append(header_text)
-            if caption_chunks:
-                first_lines.append(caption_chunks[0])
-            first_lines.append(bottom_text)
-
+            # Gửi tin nhắn có khung viền blockquote và link video kích hoạt trình phát
+            # KHÔNG truyền 'embeds' để Discord không nuốt mất trình phát video
             _send_followup(token, {
-                "content": "\n\n".join(first_lines),
-                "components": components
+                "content": content,
+                "components": components,
             })
 
-            # Gửi các phần caption tiếp theo qua tin nhắn Followup mới
+            # Nếu caption dài hơn giới hạn, gửi tiếp các phần còn lại qua followup mới
+            total_parts = len(caption_chunks)
             for index in range(1, total_parts):
+                chunk_text = caption_chunks[index]
+                chunk_lines = [f"> {l}" if l.strip() else ">" for l in chunk_text.split("\n")]
                 _send_new_followup(token, {
-                    "content": f"*(Phần {index + 1}/{total_parts})*\n\n{caption_chunks[index]}"
+                    "content": f"*(Phần {index + 1}/{total_parts})*\n\n" + "\n".join(chunk_lines)
                 })
             return
 
@@ -648,7 +823,14 @@ def _process_slash_command(interaction: dict):
             "url": data.get("url") or fb_url
         }
 
-        stats_footer_section = f"\n\n{stats_bar}\n{meta_bar}"
+        footer_elements = []
+        if stats_bar:
+            footer_elements.append(stats_bar)
+        footer_elements.append("Facebook")
+        time_ago = _format_time_ago(data.get("timestamp"))
+        if time_ago:
+            footer_elements.append(time_ago)
+        footer_text = " • ".join(footer_elements)
 
         if not text_chunks:
             embed = {
@@ -658,6 +840,8 @@ def _process_slash_command(interaction: dict):
                 "color": 0x1877F2,
                 "author": author_info,
             }
+            if footer_text:
+                embed["footer"] = {"text": footer_text[:2048]}
             if data.get("image"):
                 embed["image"] = {"url": data["image"]}
 
@@ -671,9 +855,6 @@ def _process_slash_command(interaction: dict):
 
         # Gửi Phần 1 vào Embed chính (@original)
         first_desc = text_chunks[0]
-        if total_parts == 1:
-            first_desc += stats_footer_section
-
         first_embed = {
             "description": first_desc,
             "color": 0x1877F2,
@@ -681,9 +862,12 @@ def _process_slash_command(interaction: dict):
         }
         if data.get("title") and data.get("title") != author_name:
             first_embed["title"] = data["title"][:256]
+            first_embed["url"] = data.get("url") or fb_url
 
         if total_parts > 1:
             first_embed["footer"] = {"text": f"Phần 1/{total_parts}"}
+        elif footer_text:
+            first_embed["footer"] = {"text": footer_text[:2048]}
 
         if total_parts == 1 and data.get("image"):
             first_embed["image"] = {"url": data["image"]}
@@ -696,13 +880,10 @@ def _process_slash_command(interaction: dict):
         # Nếu có các Phần tiếp theo (2, 3, 4...), gửi tiếp qua POST Followup Messages
         for index in range(1, total_parts):
             chunk_desc = text_chunks[index]
-            if index == total_parts - 1:
-                chunk_desc += stats_footer_section
-
             followup_embed = {
                 "description": chunk_desc,
                 "color": 0x1877F2,
-                "footer": {"text": f"Phần {index + 1}/{total_parts}"}
+                "footer": {"text": f"Phần {index + 1}/{total_parts}" if index < total_parts - 1 else f"Phần {index + 1}/{total_parts} • {footer_text}"[:2048]}
             }
             if index == total_parts - 1 and data.get("image"):
                 followup_embed["image"] = {"url": data["image"]}
@@ -710,7 +891,6 @@ def _process_slash_command(interaction: dict):
             _send_new_followup(token, {
                 "embeds": [followup_embed]
             })
-
     except Exception as err:
         logger.error(f"Loi bat ngo khi dong goi va gui tin nhan: {err}")
         logger.error(traceback.format_exc())

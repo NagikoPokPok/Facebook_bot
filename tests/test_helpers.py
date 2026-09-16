@@ -139,3 +139,49 @@ class TestBuildStatsText:
         assert "Facebook" in meta_bar
         assert "1 giờ trước" in meta_bar
         assert "[Link](https://facebook.com/test)" in meta_bar
+
+
+class TestFacebookTitleAndStatsParser:
+    def test_format_count_vietnamese_comma(self):
+        from main import _format_count
+        assert _format_count("4,3K") == "4.3K"
+        assert _format_count("1,2M") == "1.2M"
+
+    def test_login_wall_detection(self):
+        from main import is_login_wall_text
+        assert is_login_wall_text("Log in or sign up to view") is True
+        assert is_login_wall_text("Đăng nhập hoặc đăng ký để xem") is True
+        assert is_login_wall_text("See posts, photos and more on Facebook") is True
+        assert is_login_wall_text("Nội dung bài viết bình thường") is False
+        assert is_login_wall_text(None) is False
+
+    def test_parse_stats_from_text(self):
+        from main import parse_stats_from_text
+        stats = parse_stats_from_text("515K lượt xem · 4,3K cảm xúc · 100 bình luận · 25 chia sẻ")
+        assert stats.get("views") == "515K"
+        assert stats.get("likes") == "4,3K"
+        assert stats.get("comments") == "100"
+        assert stats.get("shares") == "25"
+
+    def test_parse_stats_from_english_text(self):
+        from main import parse_stats_from_text
+        stats = parse_stats_from_text("1.2M views · 45K reactions · 350 comments · 80 shares")
+        assert stats.get("views") == "1.2M"
+        assert stats.get("likes") == "45K"
+        assert stats.get("comments") == "350"
+        assert stats.get("shares") == "80"
+
+    def test_parse_fb_title_composite(self):
+        from main import parse_fb_title
+        raw = "515K lượt xem · 4,3K cảm xúc | How AI actually searches the web... | KodeKloud"
+        res = parse_fb_title(raw)
+        assert res["author"] == "KodeKloud"
+        assert res["title"] == "How AI actually searches the web..."
+        assert res["stats"]["likes"] == "4,3K"
+        assert res["stats"]["views"] == "515K"
+
+    def test_parse_fb_title_login_wall_filtered(self):
+        from main import parse_fb_title
+        res = parse_fb_title("Log in or sign up to view")
+        assert res["title"] is None
+        assert res["author"] is None

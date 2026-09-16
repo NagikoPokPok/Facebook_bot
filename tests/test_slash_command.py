@@ -96,7 +96,10 @@ class TestSlashCommandHandling:
             token, payload = call_args[0], call_args[1]
             assert token == "test_token_video"
             assert "[▶️ Video](https://fbcdn.net/video.mp4)" in payload["content"]
-            assert "Fanpage Hai" in payload["content"]
+            assert "embeds" not in payload
+            assert "> **Fanpage Hai**" in payload["content"]
+            assert "👍 5K" in payload["content"]
+            assert len(payload["components"]) == 1
 
     def test_post_payload_formatting(self):
         interaction = {
@@ -292,5 +295,55 @@ class TestSlashCommandHandling:
             assert "embeds" in args[1]
             assert args[1]["embeds"][0]["author"]["name"] == "Dây Chun (@daychun5)"
             assert args[1]["embeds"][0]["url"] == "https://www.threads.net/@daychun5/post/DdErKg5D6uB"
+
+    def test_video_embed_exact_kodekloud_scenario(self):
+        """Kiểm tra kịch bản video thực tế từ clip-fb.png: bóc tách 4.3K likes, 100 comments, đóng khung embed và không bị lỗi login wall."""
+        interaction = {
+            "token": "token_kodekloud",
+            "data": {
+                "name": "fbembbed",
+                "options": [
+                    {"name": "url", "value": "https://www.facebook.com/reel/123456789"}
+                ],
+            },
+        }
+
+        mock_data = {
+            "title": "How AI actually searches the web is different from what most people picture.",
+            "description": "We break down the full loop between the model and backend infrastructure.",
+            "image": "https://fbcdn.net/thumb_kodekloud.jpg",
+            "video_url": "https://video.xx.fbcdn.net/video.mp4",
+            "author": "KodeKloud",
+            "site_name": "Facebook",
+            "url": "https://www.facebook.com/reel/123456789",
+            "likes": "4,3K",
+            "comments": "100",
+            "shares": "25",
+            "timestamp": time.time() - 86400 * 60,
+        }
+
+        with patch("main._fetch_fb_data", return_value=mock_data), \
+             patch("main._send_followup") as mock_followup:
+            _process_slash_command(interaction)
+            mock_followup.assert_called_once()
+            args = mock_followup.call_args[0]
+            token, payload = args[0], args[1]
+
+            assert token == "token_kodekloud"
+            # 1. Video link có trong content để kích hoạt HTML5 Player của Discord
+            assert "[▶️ Video](https://video.xx.fbcdn.net/video.mp4)" in payload["content"]
+            # 2. Không để lộ link facebook trong content (triệt tiêu 'Log in or sign up to view')
+            assert "https://www.facebook.com" not in payload["content"]
+            # 3. Đóng khung giao diện bằng Blockquote Markdown (>), không gửi embeds để không nuốt mất trình phát video
+            assert "embeds" not in payload
+            assert "> **KodeKloud**" in payload["content"]
+            assert "We break down the full loop" in payload["content"]
+            # 4. Gán đúng số liệu like và comment có emoji
+            assert "👍 4.3K" in payload["content"]
+            assert "💬 100" in payload["content"]
+            assert "Facebook" in payload["content"]
+            assert "2 tháng trước" in payload["content"]
+            # 5. Có nút Xem trên Facebook
+            assert len(payload["components"]) == 1
 
 

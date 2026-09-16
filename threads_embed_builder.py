@@ -11,7 +11,8 @@ from threads_fetcher import ThreadsPost
 
 # Threads Brand constants
 THREADS_COLOR = 0x101010  # Premium dark theme
-THREADS_ICON_URL = "https://static.cdninstagram.com/rsrc.php/yP/r/0Qa-AOmHi0c.ico"
+# ponytail: Dùng CDN PNG chính thức thay vì file .ico để Discord hiển thị sắc nét, không bị gãy icon
+THREADS_ICON_URL = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/threads.png"
 MAX_DESCRIPTION_LENGTH = 900
 MAX_GALLERY_IMAGES = 4
 
@@ -63,7 +64,14 @@ def build_threads_embeds(post: ThreadsPost):
     )
 
     # Author header
-    author_name = f"{post.author_name} (@{post.author_handle})" if post.author_handle else post.author_name
+    # ponytail: Tối ưu hiển thị author: nếu display name trùng handle thì chỉ hiện @handle, tránh lặp xmawmx (@xmawmx)
+    if post.author_handle and post.author_name and post.author_name.lower() != post.author_handle.lower() and post.author_name != "Threads User":
+        author_name = f"{post.author_name} (@{post.author_handle})"
+    elif post.author_handle and post.author_handle.lower() != "threads":
+        author_name = f"@{post.author_handle}"
+    else:
+        author_name = post.author_name or "Threads User"
+
     main_embed.set_author(
         name=author_name[:256],
         icon_url=post.author_avatar_url or THREADS_ICON_URL,
@@ -130,7 +138,13 @@ def build_threads_payload_dict(post: ThreadsPost) -> dict:
         video_notice = "🎥 *Bài viết có video — nhấn nút bên dưới để xem*"
         description = f"{description}\n\n{video_notice}".strip()
 
-    author_name = f"{post.author_name} (@{post.author_handle})" if post.author_handle else post.author_name
+    # ponytail: Tối ưu hiển thị author cho serverless payload
+    if post.author_handle and post.author_name and post.author_name.lower() != post.author_handle.lower() and post.author_name != "Threads User":
+        author_name = f"{post.author_name} (@{post.author_handle})"
+    elif post.author_handle and post.author_handle.lower() != "threads":
+        author_name = f"@{post.author_handle}"
+    else:
+        author_name = post.author_name or "Threads User"
     footer_text = "Threads"
     if len(post.image_urls) > MAX_GALLERY_IMAGES:
         extra_count = len(post.image_urls) - MAX_GALLERY_IMAGES

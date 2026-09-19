@@ -381,5 +381,3 @@ Hệ thống **Facebook & Threads Embed Discord Bot** hiện tại đã sở h�
 3. **Hiểu rõ ý nghĩa của Code Coverage:** Đạt 100% statement coverage không có nghĩa là code không có bug; nó chỉ có nghĩa là mọi dòng code đã được chạy qua. Branch Coverage và Condition Coverage mới là thước đo thực sự của chất lượng code.
 4. **Tài liệu hóa rõ ràng:** Một bug report rõ ràng, dễ tái hiện (kèm Preconditions, Steps, Expected vs Actual) có giá trị gấp mười lần một lời nói suông.
 
----
-*Báo cáo được hoàn thành và phê duyệt bởi Antigravity Software Quality Assurance Team.*

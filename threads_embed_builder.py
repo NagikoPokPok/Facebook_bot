@@ -4,14 +4,14 @@ from typing import Optional
 try:
     import discord
 except ImportError:
-    # ponytail: Cho phép hoạt động trên serverless AWS Lambda không cài discord.py
+    #  Cho phép hoạt động trên serverless AWS Lambda không cài discord.py
     discord = None
 
 from threads_fetcher import ThreadsPost
 
 # Threads Brand constants
 THREADS_COLOR = 0x101010  # Premium dark theme
-# ponytail: Dùng CDN PNG chính thức thay vì file .ico để Discord hiển thị sắc nét, không bị gãy icon
+#  Dùng CDN PNG chính thức thay vì file .ico để Discord hiển thị sắc nét, không bị gãy icon
 THREADS_ICON_URL = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/threads.png"
 MAX_DESCRIPTION_LENGTH = 900
 MAX_GALLERY_IMAGES = 4
@@ -64,7 +64,7 @@ def build_threads_embeds(post: ThreadsPost):
     )
 
     # Author header
-    # ponytail: Tối ưu hiển thị author: nếu display name trùng handle thì chỉ hiện @handle, tránh lặp xmawmx (@xmawmx)
+    #  Tối ưu hiển thị author: nếu display name trùng handle thì chỉ hiện @handle, tránh lặp xmawmx (@xmawmx)
     if post.author_handle and post.author_name and post.author_name.lower() != post.author_handle.lower() and post.author_name != "Threads User":
         author_name = f"{post.author_name} (@{post.author_handle})"
     elif post.author_handle and post.author_handle.lower() != "threads":
@@ -131,14 +131,14 @@ def build_threads_payload_dict(post: ThreadsPost) -> dict:
     """
     Builds a raw Discord REST API payload dictionary for serverless / webhook environments
     (compatible with main.py / AWS Lambda / Flask).
-    ponytail: Dựng raw dict chuẩn Discord REST API trực tiếp, không phụ thuộc discord.py, tối ưu cold-start.
+     Dựng raw dict chuẩn Discord REST API trực tiếp, không phụ thuộc discord.py, tối ưu cold-start.
     """
     description = truncate_description(post.text, post.post_url)
     if post.video_url or post.video_thumbnail_url:
         video_notice = "🎥 *Bài viết có video — nhấn nút bên dưới để xem*"
         description = f"{description}\n\n{video_notice}".strip()
 
-    # ponytail: Tối ưu hiển thị author cho serverless payload
+    #  Tối ưu hiển thị author cho serverless payload
     if post.author_handle and post.author_name and post.author_name.lower() != post.author_handle.lower() and post.author_name != "Threads User":
         author_name = f"{post.author_name} (@{post.author_handle})"
     elif post.author_handle and post.author_handle.lower() != "threads":

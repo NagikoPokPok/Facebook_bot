@@ -355,12 +355,12 @@ class ThreadsFetcher:
                 # ponytail: có ảnh sạch từ SSR → dùng luôn, bỏ card
                 image_urls = clean_images
             else:
-                # ponytail: không có clean images → dùng og:image kể cả synthesized card
-                # Ảnh xấu (card) vẫn tốt hơn không ảnh. Chỉ loại avatar & generic meta asset.
+                # ponytail: không có clean images → dùng og:image nhưng loại synthesized card
                 if (
                     og_image
                     and not self._is_generic_meta_asset(og_image)
                     and not self._is_avatar_asset(og_image)
+                    and not self._is_synthesized_card(og_image)
                 ):
                     image_urls.append(og_image)
 
@@ -373,6 +373,7 @@ class ThreadsFetcher:
                         and c not in image_urls
                         and not self._is_generic_meta_asset(c)
                         and not self._is_avatar_asset(c)
+                        and not self._is_synthesized_card(c)
                     ):
                         image_urls.append(c)
 
@@ -520,7 +521,10 @@ class ThreadsFetcher:
             # Fallback tìm post_id dạng raw nếu không có "code":"
             idx = html_clean.find(post_id)
             if idx == -1:
+                # ponytail: log SSR miss để debug — bài cũ có thể không nằm trong SSR profile
+                logger.info(f"SSR miss: post_id={post_id} not found in profile HTML ({len(html_clean)} chars)")
                 return []
+            logger.info(f"SSR: post_id={post_id} found via raw match (not 'code' key) at idx={idx}")
 
         # Kiểm tra carousel_media trước post_id
         # Trong schema của Instagram/Threads, carousel_media đứng ngay trước post code
@@ -541,6 +545,8 @@ class ThreadsFetcher:
             target_chunk,
         )
         if not raw_urls:
+            # ponytail: post nằm trong SSR nhưng không có ảnh t51-15 → text-only hoặc video-only
+            logger.info(f"SSR: post_id={post_id} found in SSR but no t51.*-15 image URLs in chunk ({len(target_chunk)} chars)")
             return []
 
         # Nhóm theo tên file asset để chọn bản độ phân giải cao nhất

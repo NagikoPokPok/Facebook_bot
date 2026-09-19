@@ -13,7 +13,6 @@ from dotenv import load_dotenv
 from nacl.exceptions import BadSignatureError
 from nacl.signing import VerifyKey
 import requests
-# ponytail: Không import yt_dlp ở top-level (tốn 4.2s nạp module gây cold start timeout 3s của Discord). Lazy load khi cần.
 
 # ==============================================================================
 # BƯỚC 1: KHỞI TẠO CẤU HÌNH VÀ BIẾN MÔI TRƯỜNG
@@ -58,7 +57,7 @@ if DISCORD_PUBLIC_KEY:
     except Exception as error:
         logger.error(f"Khong the khoi tao DISCORD_PUBLIC_KEY: {error}")
 
-# ponytail: Lazy singleton boto3 lambda client có sẵn region để tái sử dụng connection pool
+#  Lazy singleton boto3 lambda client có sẵn region để tái sử dụng connection pool
 _lambda_client = None
 
 def _get_lambda_client():
@@ -144,7 +143,7 @@ def _format_count(count_value) -> str:
         return None
     if isinstance(count_value, str):
         val = count_value.strip()
-        # ponytail: Chuẩn hóa số đã rút gọn có dấu phẩy/chấm (ví dụ 4,3K -> 4.3K)
+        #  Chuẩn hóa số đã rút gọn có dấu phẩy/chấm (ví dụ 4,3K -> 4.3K)
         m_short = re.match(r"^(\d+)[,\.](\d+)\s*([KkMmBb])$", val)
         if m_short:
             return f"{m_short.group(1)}.{m_short.group(2)}{m_short.group(3).upper()}"
@@ -164,7 +163,7 @@ def _format_count(count_value) -> str:
         return str(count_value)
 
 
-# ponytail: Bộ lọc các cụm từ login wall/yêu cầu đăng nhập của Facebook
+#  Bộ lọc các cụm từ login wall/yêu cầu đăng nhập của Facebook
 LOGIN_WALL_PHRASES = [
     "log in or sign up to view",
     "đăng nhập hoặc đăng ký để xem",
@@ -179,7 +178,7 @@ LOGIN_WALL_PHRASES = [
 
 def is_login_wall_text(text: str) -> bool:
     """
-    ponytail: Kiểm tra chuỗi có chứa các câu thông báo yêu cầu đăng nhập của Facebook hay không.
+     Kiểm tra chuỗi có chứa các câu thông báo yêu cầu đăng nhập của Facebook hay không.
     """
     if not text:
         return False
@@ -189,7 +188,7 @@ def is_login_wall_text(text: str) -> bool:
 
 def parse_stats_from_text(text: str) -> dict:
     """
-    ponytail: Bóc tách chỉ số tương tác (views, likes, comments, shares) từ chuỗi văn bản hoặc tiêu đề Facebook.
+     Bóc tách chỉ số tương tác (views, likes, comments, shares) từ chuỗi văn bản hoặc tiêu đề Facebook.
     """
     stats = {}
     if not text or is_login_wall_text(text):
@@ -236,7 +235,7 @@ def parse_stats_from_text(text: str) -> dict:
 
 def parse_fb_title(raw_title: str) -> dict:
     """
-    ponytail: Phân tích cú pháp tiêu đề Facebook để tách tác giả, bài viết gốc và chỉ số tương tác.
+     Phân tích cú pháp tiêu đề Facebook để tách tác giả, bài viết gốc và chỉ số tương tác.
     Ví dụ: '515K lượt xem · 4,3K cảm xúc | Nội dung video... | KodeKloud'
     """
     res = {"author": None, "title": None, "description": None, "stats": {}}
@@ -374,7 +373,7 @@ def _fetch_fb_data(url: str) -> dict:
     # Phân loại link: Xác định URL có phải là Video/Reel/Watch hay không
     is_video_link = bool(re.search(r"/(?:reel|watch|videos|share/v|r)/", url, re.IGNORECASE))
 
-    # ponytail: BƯỚC 1: FAST-PATH (1 request HTTP duy nhất ~1s) cào cả OpenGraph, Full-text, Stats & Direct Video MP4
+    #  BƯỚC 1: FAST-PATH (1 request HTTP duy nhất ~1s) cào cả OpenGraph, Full-text, Stats & Direct Video MP4
     try:
         clean_url = re.sub(r"[?&](?:rdid|share_url|__cft__|__tn__)=[^&]*", "", data["url"] or url)
         resp = http_session.get(clean_url, headers=HEADERS, allow_redirects=True, timeout=5)
@@ -417,7 +416,7 @@ def _fetch_fb_data(url: str) -> dict:
         data["image"] = data["image"] or og_image
         data["url"] = str(resp.url)
 
-        # ponytail: Trích xuất trực tiếp CDN link MP4 từ JSON nhúng trong HTML của Facebook (không cần yt-dlp)
+        #  Trích xuất trực tiếp CDN link MP4 từ JSON nhúng trong HTML của Facebook (không cần yt-dlp)
         video_matches = re.findall(
             r'"(?:playable_url|playable_url_quality_hd|browser_native_hd_url|browser_native_sd_url)"\s*:\s*"(https?[^"]+)"',
             html,
@@ -453,7 +452,7 @@ def _fetch_fb_data(url: str) -> dict:
         elif og_desc and not is_login_wall_text(og_desc):
             data["description"] = data["description"] or og_desc
 
-        # ponytail: Trích xuất chỉ số tương tác (likes, comments, shares) từ HTML/JSON
+        #  Trích xuất chỉ số tương tác (likes, comments, shares) từ HTML/JSON
         if not data["likes"]:
             rx_i18n_likes = re.findall(r'"i18n_reaction_count"\s*:\s*"([^"]+)"', html)
             if rx_i18n_likes:
@@ -497,7 +496,7 @@ def _fetch_fb_data(url: str) -> dict:
     except Exception as error:
         logger.warning(f"Fast-path fetch error: {error}")
 
-    # ponytail: BƯỚC 2: CHỈ FALLBACK SANG yt-dlp KHI LÀ VIDEO MÀ FAST-PATH CHƯA BÓC ĐƯỢC LINK STREAM
+    #  BƯỚC 2: CHỈ FALLBACK SANG yt-dlp KHI LÀ VIDEO MÀ FAST-PATH CHƯA BÓC ĐƯỢC LINK STREAM
     if is_video_link and not data.get("video_url"):
         try:
             import yt_dlp
@@ -509,7 +508,7 @@ def _fetch_fb_data(url: str) -> dict:
                 "noplaylist": True,
                 "socket_timeout": 6,
                 "cachedir": False,
-                "check_formats": False,  # ponytail: Không probe từng format stream giúp tiết kiệm 2-3s
+                "check_formats": False,  #  Không probe từng format stream giúp tiết kiệm 2-3s
             }
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
@@ -534,7 +533,7 @@ def _fetch_fb_data(url: str) -> dict:
         except Exception as error:
             logger.warning(f"yt-dlp fallback failed: {error}")
 
-    # ponytail: Dọn dẹp dứt điểm các chuỗi thông báo login wall nếu còn sót lại
+    #  Dọn dẹp dứt điểm các chuỗi thông báo login wall nếu còn sót lại
     if is_login_wall_text(data.get("title")):
         data["title"] = None
     if is_login_wall_text(data.get("description")):
@@ -752,7 +751,7 @@ def _process_slash_command(interaction: dict):
             caption = (data.get("description") or "").strip()
             title = (data.get("title") or "").strip()
 
-            # ponytail: Xây dựng thanh footer thống kê tương tác
+            #  Xây dựng thanh footer thống kê tương tác
             meta_elements = []
             if stats_bar:
                 meta_elements.append(stats_bar)
@@ -762,7 +761,7 @@ def _process_slash_command(interaction: dict):
                 meta_elements.append(time_ago)
             meta_line = " • ".join(meta_elements)
 
-            # ponytail: Chuẩn bị nội dung đóng khung bằng blockquote (>)
+            #  Chuẩn bị nội dung đóng khung bằng blockquote (>)
             # Discord Markdown blockquote (>) tạo viền dọc bên trái đẹp như Embed
             # mà vẫn bảo toàn 100% khả năng kích hoạt Trình phát Video HTML5 của Discord.
             lines = []
@@ -912,7 +911,7 @@ def lambda_handler(event, context):
     """
     Handler chính xử lý toàn bộ request từ Discord tương tác với Lambda / Webhook.
     """
-    # ponytail: Bắt tác vụ tự gọi ngầm (Async Lambda Invoke) để không bị Lambda đóng băng CPU
+    #  Bắt tác vụ tự gọi ngầm (Async Lambda Invoke) để không bị Lambda đóng băng CPU
     if isinstance(event, dict) and event.get("async_task") == "process_slash_command":
         logger.info("=== RUNNING ASYNC BACKGROUND TASK ===")
         _process_slash_command(event.get("interaction", {}))
@@ -924,7 +923,7 @@ def lambda_handler(event, context):
         or ""
     ).upper()
 
-    # ponytail: Xử lý CORS Preflight (OPTIONS) từ trình duyệt
+    #  Xử lý CORS Preflight (OPTIONS) từ trình duyệt
     if method == "OPTIONS":
         logger.info("=== HANDLING CORS OPTIONS PREFLIGHT ===")
         return {
@@ -981,7 +980,7 @@ def lambda_handler(event, context):
     # 2. Xử lý Application Command / Slash Command (Type 2)
     if interaction.get("type") == 2:
 
-        # ponytail: Nếu chạy trên AWS Lambda, kích hoạt Async Invoke chính nó bằng boto3 (có sẵn trong runtime, 0đ)
+        #  Nếu chạy trên AWS Lambda, kích hoạt Async Invoke chính nó bằng boto3 (có sẵn trong runtime, 0đ)
         # để trả về Type 5 < 50ms cho Discord mà tiến trình cào dữ liệu không bị đóng băng (freezing).
         if context and hasattr(context, "function_name"):
             try:

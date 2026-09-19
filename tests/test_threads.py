@@ -395,9 +395,8 @@ class TestThreadsFetcher:
             mock_avatar.return_value = "https://scontent.fna.fbcdn.net/v/t51.82787-19/avatar.jpg"
 
             post = await fetcher._fetch_og_scrape(url, "zuck", "CuZsgfWLyiI")
-            # ponytail: card is kept as fallback when no clean images — bad image > no image
-            assert len(post.image_urls) == 1
-            assert "t39.92108-6" in post.image_urls[0]
+            # For text-only post, synthesized card (t39.92108-6) must be discarded
+            assert len(post.image_urls) == 0
             assert post.author_avatar_url == "https://scontent.fna.fbcdn.net/v/t51.82787-19/avatar.jpg"
 
         await fetcher.close()
